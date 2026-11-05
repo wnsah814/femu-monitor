@@ -1590,7 +1590,6 @@ static void zns_register_metrics(FemuCtrl *n)
                        3, dp, zns_fill_plane_conflict, n);
     femon_register_arr(reg, "zns.plane.wait_ns", FEMON_MT_U64,
                        3, dp, zns_fill_plane_wait, n);
-    /* "model": the name says this is emulator-computed latency, not measured in the guest */
     femon_register_arr(reg, "zns.zone.state", FEMON_MT_U64, 1, dz, zns_fill_zone_state, n);
     femon_register_arr(reg, "zns.zone.type",  FEMON_MT_U64, 1, dz, zns_fill_zone_type, n);
     femon_register_arr(reg, "zns.zone.attr",  FEMON_MT_U64, 1, dz, zns_fill_zone_attr, n);
@@ -1600,6 +1599,7 @@ static void zns_register_metrics(FemuCtrl *n)
     femon_register_arr(reg, "zns.ch.conflict_count", FEMON_MT_U64, 1, dc, zns_fill_ch_conflict, n);
     femon_register_arr(reg, "zns.ch.wait_ns",        FEMON_MT_U64, 1, dc, zns_fill_ch_wait, n);
     femon_registry_set_reset_hook(reg, zns_femon_reset_hook, n);
+    /* "lat_model": emulator-computed latency, not measured in the guest */
     femon_register_hist(reg, "zns.reset.lat_model_us", &zns->reset_lat_hist);
     n->post_lag_hist = g_malloc0(sizeof(femon_hist_t));
     femon_register_hist(reg, "nvme.cpl.post_lag_us", n->post_lag_hist);
