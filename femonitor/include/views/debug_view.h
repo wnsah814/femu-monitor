@@ -40,7 +40,7 @@ void debug_log_clear(void);
  * @return Number of log entries
  */
 int debug_log_get_count(
-    void);  // 이름 변경: debug_log_count -> debug_log_get_count
+    void);
 
 /**
  * Get log entry by index

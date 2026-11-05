@@ -71,4 +71,12 @@ int nvme_detect_device_info(const char *device_path,
  */
 device_type_t nvme_detect_device_type(const char *device_path);
 
+/**
+ * Reset monitoring statistics on the device
+ *
+ * @param device_path Path to the NVMe device
+ * @return 0 on success, non-zero on failure
+ */
+int nvme_reset_stats(const char *device_path);
+
 #endif /* NVME_CMD_H */

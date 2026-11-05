@@ -22,11 +22,14 @@ static int view_zns_render(WINDOW *win, device_manager_t *manager, int width,
 static int view_zns_handle_input(int ch, device_manager_t *manager);
 static void view_zns_cleanup(void);
 static int render_all_zones_table(WINDOW *win, device_manager_t *manager, int width, int height);
+static int render_interference_detail(WINDOW *win, device_manager_t *manager, int width, int height);
 
 // Local variables
 static int view_zns_initialized = 0;
 static int show_all_zones = 0;  // Toggle for showing all zones table
+static int show_interference = 0;  // Toggle for showing detailed interference view
 static int zone_scroll_offset = 0;   // Scroll offset for all zones view
+static int interference_scroll_offset = 0;  // Scroll offset for interference view
 
 // Zone state definitions for display
 static const char* zone_state_names[] = {
@@ -112,20 +115,27 @@ static int view_zns_render(WINDOW *win, device_manager_t *manager, int width,
     return render_all_zones_table(win, manager, width, height);
   }
 
+  // Check if we should show detailed interference view
+  if (show_interference) {
+    return render_interference_detail(win, manager, width, height);
+  }
+
   int row = 3;
   int col_left = 2;
   int col_right = width / 2 + 2;
   int half_width = width / 2 - 4;
 
   // Check if this is the correct mode
-  if (manager->mode != MODE_MULTI) {
+  if (manager->mode != MODE_MULTI && manager->mode != MODE_ZNSSD) {
     mvwprintw(win, row, col_left,
-              "ZNS view is only available in BBSSD+ZNSSD mode");
+              "ZNS view is only available in ZNSSD or BBSSD+ZNSSD mode");
     return 0;
   }
 
   // Get current device context
-  device_context_t *device = &manager->devices[1];
+  // In MODE_ZNSSD, the ZNS device is at index 0; in MODE_MULTI, it's at index 1
+  int zns_device_index = (manager->mode == MODE_ZNSSD) ? 0 : 1;
+  device_context_t *device = &manager->devices[zns_device_index];
 
   // Check if current device is ZNSSD type
   if (device->device_type != DEVICE_ZNSSD) {
@@ -303,11 +313,93 @@ static int view_zns_render(WINDOW *win, device_manager_t *manager, int width,
     mvwprintw(win, box_row++, col_right + 2, "Efficiency      : N/A");
   }
 
+  // ========== LEFT COLUMN BOTTOM: HW Interference Statistics ==========
+
+  // Channel Interference Box (if data available)
+  if (znssd_data->num_channels > 0 && znssd_data->channel_stats) {
+    draw_box_with_title(win, row, col_left, 8, half_width, "Channel Interference",
+                        COLOR_PAIR_CYAN);
+    box_row = row + 1;
+
+    // Calculate totals across all channels
+    uint64_t total_xfer = 0, total_conflicts = 0, total_wait_ns = 0;
+    for (uint64_t i = 0; i < znssd_data->num_channels; i++) {
+      total_xfer += znssd_data->channel_stats[i].total_xfer_count;
+      total_conflicts += znssd_data->channel_stats[i].conflict_count;
+      total_wait_ns += znssd_data->channel_stats[i].total_wait_time_ns;
+    }
+
+    mvwprintw(win, box_row++, col_left + 2, "Channels        : %llu",
+              (unsigned long long)znssd_data->num_channels);
+
+    char xfer_str[32];
+    format_number(total_xfer, xfer_str, sizeof(xfer_str));
+    mvwprintw(win, box_row++, col_left + 2, "Total Transfers : %s", xfer_str);
+
+    // Conflict rate
+    double conflict_rate = (total_xfer > 0) ? (double)total_conflicts * 100.0 / total_xfer : 0;
+    int conflict_color = (conflict_rate < 5) ? COLOR_PAIR_GREEN :
+                         (conflict_rate < 20) ? COLOR_PAIR_YELLOW : COLOR_PAIR_RED;
+    wattron(win, COLOR_PAIR(conflict_color));
+    mvwprintw(win, box_row++, col_left + 2, "Conflict Rate   : %.2f%%", conflict_rate);
+    wattroff(win, COLOR_PAIR(conflict_color));
+
+    // Average wait time per conflict
+    double avg_wait_us = (total_conflicts > 0) ? (double)total_wait_ns / total_conflicts / 1000.0 : 0;
+    mvwprintw(win, box_row++, col_left + 2, "Avg Wait Time   : %.2f us", avg_wait_us);
+
+    // Total wait time
+    double total_wait_ms = (double)total_wait_ns / 1000000.0;
+    mvwprintw(win, box_row++, col_left + 2, "Total Wait      : %.2f ms", total_wait_ms);
+
+    row += 9;
+  }
+
+  // Plane Interference Box (if data available)
+  if (znssd_data->num_planes > 0 && znssd_data->plane_stats) {
+    draw_box_with_title(win, row, col_left, 8, half_width, "Plane Interference",
+                        COLOR_PAIR_CYAN);
+    box_row = row + 1;
+
+    // Calculate totals across all planes
+    uint64_t total_io = 0, total_conflicts = 0, total_wait_ns = 0;
+    for (uint64_t i = 0; i < znssd_data->num_planes; i++) {
+      total_io += znssd_data->plane_stats[i].total_io_count;
+      total_conflicts += znssd_data->plane_stats[i].conflict_count;
+      total_wait_ns += znssd_data->plane_stats[i].total_wait_time_ns;
+    }
+
+    mvwprintw(win, box_row++, col_left + 2, "Planes          : %llu",
+              (unsigned long long)znssd_data->num_planes);
+
+    char io_str[32];
+    format_number(total_io, io_str, sizeof(io_str));
+    mvwprintw(win, box_row++, col_left + 2, "Total I/O Ops   : %s", io_str);
+
+    // Conflict rate
+    double conflict_rate = (total_io > 0) ? (double)total_conflicts * 100.0 / total_io : 0;
+    int conflict_color = (conflict_rate < 5) ? COLOR_PAIR_GREEN :
+                         (conflict_rate < 20) ? COLOR_PAIR_YELLOW : COLOR_PAIR_RED;
+    wattron(win, COLOR_PAIR(conflict_color));
+    mvwprintw(win, box_row++, col_left + 2, "Conflict Rate   : %.2f%%", conflict_rate);
+    wattroff(win, COLOR_PAIR(conflict_color));
+
+    // Average wait time per conflict
+    double avg_wait_us = (total_conflicts > 0) ? (double)total_wait_ns / total_conflicts / 1000.0 : 0;
+    mvwprintw(win, box_row++, col_left + 2, "Avg Wait Time   : %.2f us", avg_wait_us);
+
+    // Total wait time
+    double total_wait_ms = (double)total_wait_ns / 1000000.0;
+    mvwprintw(win, box_row++, col_left + 2, "Total Wait      : %.2f ms", total_wait_ms);
+
+    row += 9;
+  }
+
   // Bottom help text
   int bottom_row = height - 2;
   wattron(win, A_DIM);
   mvwprintw(win, bottom_row, col_left,
-            "Press 'a' for all zones");
+            "Press 'a' for all zones | 'i' for detailed interference");
   wattroff(win, A_DIM);
 
   return 0;
@@ -326,7 +418,15 @@ static int view_zns_handle_input(int ch, device_manager_t *manager) {
     case 'a':  // Toggle all zones view
     case 'A':
       show_all_zones = !show_all_zones;
+      show_interference = 0;  // Disable interference view when showing zones
       zone_scroll_offset = 0;  // Reset scroll when toggling
+      return 1;
+
+    case 'i':  // Toggle detailed interference view
+    case 'I':
+      show_interference = !show_interference;
+      show_all_zones = 0;  // Disable zones view when showing interference
+      interference_scroll_offset = 0;  // Reset scroll when toggling
       return 1;
 
     case ' ':  // Toggle grid
@@ -336,12 +436,16 @@ static int view_zns_handle_input(int ch, device_manager_t *manager) {
     case KEY_UP:
       if (show_all_zones && zone_scroll_offset > 0) {
         zone_scroll_offset--;
+      } else if (show_interference && interference_scroll_offset > 0) {
+        interference_scroll_offset--;
       }
       return 1;
 
     case KEY_DOWN:
       if (show_all_zones) {
         zone_scroll_offset++;
+      } else if (show_interference) {
+        interference_scroll_offset++;
       }
       return 1;
 
@@ -350,12 +454,18 @@ static int view_zns_handle_input(int ch, device_manager_t *manager) {
         zone_scroll_offset -= 10;
       } else if (show_all_zones) {
         zone_scroll_offset = 0;
+      } else if (show_interference && interference_scroll_offset > 10) {
+        interference_scroll_offset -= 10;
+      } else if (show_interference) {
+        interference_scroll_offset = 0;
       }
       return 1;
 
     case KEY_NPAGE:
       if (show_all_zones) {
         zone_scroll_offset += 10;
+      } else if (show_interference) {
+        interference_scroll_offset += 10;
       }
       return 1;
   }
@@ -377,13 +487,15 @@ static int render_all_zones_table(WINDOW *win, device_manager_t *manager, int wi
   int col = 2;
 
   // Check if this is the correct mode
-  if (manager->mode != MODE_MULTI) {
-    mvwprintw(win, row, col, "ZNS view is only available in BBSSD+ZNSSD mode");
+  if (manager->mode != MODE_MULTI && manager->mode != MODE_ZNSSD) {
+    mvwprintw(win, row, col, "ZNS view is only available in ZNSSD or BBSSD+ZNSSD mode");
     return 0;
   }
 
   // Get current device context
-  device_context_t *device = &manager->devices[1];
+  // In MODE_ZNSSD, the ZNS device is at index 0; in MODE_MULTI, it's at index 1
+  int zns_device_index = (manager->mode == MODE_ZNSSD) ? 0 : 1;
+  device_context_t *device = &manager->devices[zns_device_index];
 
   // Check if current device is ZNSSD type
   if (device->device_type != DEVICE_ZNSSD) {
@@ -520,11 +632,237 @@ static int render_all_zones_table(WINDOW *win, device_manager_t *manager, int wi
 }
 
 /**
+ * Render detailed interference statistics view
+ *
+ * @param win Window to render to
+ * @param manager Device manager
+ * @param width Window width
+ * @param height Window height
+ * @return 0 on success, non-zero on failure
+ */
+static int render_interference_detail(WINDOW *win, device_manager_t *manager, int width, int height) {
+  int row = 3;
+  int col = 2;
+
+  // Check if this is the correct mode
+  if (manager->mode != MODE_MULTI && manager->mode != MODE_ZNSSD) {
+    mvwprintw(win, row, col, "Interference view is only available in ZNSSD or BBSSD+ZNSSD mode");
+    return 0;
+  }
+
+  // Get current device context
+  int zns_device_index = (manager->mode == MODE_ZNSSD) ? 0 : 1;
+  device_context_t *device = &manager->devices[zns_device_index];
+
+  if (device->device_type != DEVICE_ZNSSD) {
+    mvwprintw(win, row, col, "Interference view requires ZNSSD device");
+    return 0;
+  }
+
+  znssd_data_t *znssd_data = (znssd_data_t *)device->device_data;
+  if (!znssd_data) {
+    mvwprintw(win, row, col, "No ZNSSD data available");
+    return 0;
+  }
+
+  // Check if interference data is available
+  if (znssd_data->num_channels == 0 && znssd_data->num_planes == 0) {
+    mvwprintw(win, row, col, "No interference data available (confznsplusplus extension not enabled)");
+    return 0;
+  }
+
+  // Title
+  wattron(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_CYAN));
+  mvwprintw(win, row++, col, "Hardware Interference Statistics (confznsplusplus)");
+  wattroff(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_CYAN));
+  row++;
+
+  // Help text
+  wattron(win, A_DIM);
+  mvwprintw(win, row++, col, "Press 'i' to return to summary view | Up/Down: Scroll | PgUp/PgDn: Page");
+  wattroff(win, A_DIM);
+  row++;
+
+  int half_width = (width - 6) / 2;
+  int col_left = col;
+  int col_right = col + half_width + 2;
+
+  // ========== CHANNEL STATISTICS (Left Column) ==========
+  if (znssd_data->num_channels > 0 && znssd_data->channel_stats) {
+    wattron(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_YELLOW));
+    mvwprintw(win, row, col_left, "Channel Interference (%llu channels)",
+              (unsigned long long)znssd_data->num_channels);
+    wattroff(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_YELLOW));
+
+    int ch_row = row + 2;
+
+    // Table header
+    wattron(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_HEADER));
+    mvwprintw(win, ch_row, col_left, "%-4s %12s %12s %8s %12s",
+              "CH", "Transfers", "Conflicts", "Rate", "Wait(us)");
+    wattroff(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_HEADER));
+    ch_row++;
+
+    // Separator
+    mvwhline(win, ch_row++, col_left, ACS_HLINE, half_width - 2);
+
+    // Calculate max visible items
+    int max_visible = (height - ch_row - 4) / 2;  // Leave room for planes section
+    if (max_visible < 5) max_visible = 5;
+
+    // Display channel statistics
+    uint64_t total_ch_xfer = 0, total_ch_conflicts = 0, total_ch_wait = 0;
+
+    for (uint64_t i = 0; i < znssd_data->num_channels; i++) {
+      total_ch_xfer += znssd_data->channel_stats[i].total_xfer_count;
+      total_ch_conflicts += znssd_data->channel_stats[i].conflict_count;
+      total_ch_wait += znssd_data->channel_stats[i].total_wait_time_ns;
+
+      if (i >= (uint64_t)interference_scroll_offset &&
+          i < (uint64_t)(interference_scroll_offset + max_visible)) {
+        znssd_channel_stat_t *stat = &znssd_data->channel_stats[i];
+
+        double conflict_rate = (stat->total_xfer_count > 0) ?
+                               (double)stat->conflict_count * 100.0 / stat->total_xfer_count : 0;
+        double avg_wait_us = (stat->conflict_count > 0) ?
+                             (double)stat->total_wait_time_ns / stat->conflict_count / 1000.0 : 0;
+
+        // Color based on conflict rate
+        int color = (conflict_rate < 5) ? COLOR_PAIR_GREEN :
+                    (conflict_rate < 20) ? COLOR_PAIR_YELLOW : COLOR_PAIR_RED;
+
+        mvwprintw(win, ch_row, col_left, "%-4llu %12llu %12llu ",
+                  (unsigned long long)i,
+                  (unsigned long long)stat->total_xfer_count,
+                  (unsigned long long)stat->conflict_count);
+
+        wattron(win, COLOR_PAIR(color));
+        wprintw(win, "%7.2f%%", conflict_rate);
+        wattroff(win, COLOR_PAIR(color));
+
+        wprintw(win, " %12.2f", avg_wait_us);
+        ch_row++;
+      }
+    }
+
+    // Totals row
+    ch_row++;
+    double total_ch_rate = (total_ch_xfer > 0) ?
+                           (double)total_ch_conflicts * 100.0 / total_ch_xfer : 0;
+    double total_ch_avg_wait = (total_ch_conflicts > 0) ?
+                               (double)total_ch_wait / total_ch_conflicts / 1000.0 : 0;
+
+    wattron(win, A_BOLD);
+    mvwprintw(win, ch_row, col_left, "%-4s %12llu %12llu %7.2f%% %12.2f",
+              "SUM",
+              (unsigned long long)total_ch_xfer,
+              (unsigned long long)total_ch_conflicts,
+              total_ch_rate,
+              total_ch_avg_wait);
+    wattroff(win, A_BOLD);
+  }
+
+  // ========== PLANE STATISTICS (Right Column) ==========
+  if (znssd_data->num_planes > 0 && znssd_data->plane_stats) {
+    wattron(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_MAGENTA));
+    mvwprintw(win, row, col_right, "Plane Interference (%llu planes)",
+              (unsigned long long)znssd_data->num_planes);
+    wattroff(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_MAGENTA));
+
+    int pl_row = row + 2;
+
+    // Table header
+    wattron(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_HEADER));
+    mvwprintw(win, pl_row, col_right, "%-4s %12s %12s %8s %12s",
+              "PL", "I/O Ops", "Conflicts", "Rate", "Wait(us)");
+    wattroff(win, A_BOLD | COLOR_PAIR(COLOR_PAIR_HEADER));
+    pl_row++;
+
+    // Separator
+    mvwhline(win, pl_row++, col_right, ACS_HLINE, half_width - 2);
+
+    // Calculate max visible items
+    int max_visible = (height - pl_row - 4) / 2;
+    if (max_visible < 5) max_visible = 5;
+
+    // Display plane statistics
+    uint64_t total_pl_io = 0, total_pl_conflicts = 0, total_pl_wait = 0;
+
+    for (uint64_t i = 0; i < znssd_data->num_planes; i++) {
+      total_pl_io += znssd_data->plane_stats[i].total_io_count;
+      total_pl_conflicts += znssd_data->plane_stats[i].conflict_count;
+      total_pl_wait += znssd_data->plane_stats[i].total_wait_time_ns;
+
+      if (i >= (uint64_t)interference_scroll_offset &&
+          i < (uint64_t)(interference_scroll_offset + max_visible)) {
+        znssd_plane_stat_t *stat = &znssd_data->plane_stats[i];
+
+        double conflict_rate = (stat->total_io_count > 0) ?
+                               (double)stat->conflict_count * 100.0 / stat->total_io_count : 0;
+        double avg_wait_us = (stat->conflict_count > 0) ?
+                             (double)stat->total_wait_time_ns / stat->conflict_count / 1000.0 : 0;
+
+        // Color based on conflict rate
+        int color = (conflict_rate < 5) ? COLOR_PAIR_GREEN :
+                    (conflict_rate < 20) ? COLOR_PAIR_YELLOW : COLOR_PAIR_RED;
+
+        mvwprintw(win, pl_row, col_right, "%-4llu %12llu %12llu ",
+                  (unsigned long long)i,
+                  (unsigned long long)stat->total_io_count,
+                  (unsigned long long)stat->conflict_count);
+
+        wattron(win, COLOR_PAIR(color));
+        wprintw(win, "%7.2f%%", conflict_rate);
+        wattroff(win, COLOR_PAIR(color));
+
+        wprintw(win, " %12.2f", avg_wait_us);
+        pl_row++;
+      }
+    }
+
+    // Totals row
+    pl_row++;
+    double total_pl_rate = (total_pl_io > 0) ?
+                           (double)total_pl_conflicts * 100.0 / total_pl_io : 0;
+    double total_pl_avg_wait = (total_pl_conflicts > 0) ?
+                               (double)total_pl_wait / total_pl_conflicts / 1000.0 : 0;
+
+    wattron(win, A_BOLD);
+    mvwprintw(win, pl_row, col_right, "%-4s %12llu %12llu %7.2f%% %12.2f",
+              "SUM",
+              (unsigned long long)total_pl_io,
+              (unsigned long long)total_pl_conflicts,
+              total_pl_rate,
+              total_pl_avg_wait);
+    wattroff(win, A_BOLD);
+  }
+
+  // Scroll indicator at bottom
+  uint64_t max_items = (znssd_data->num_channels > znssd_data->num_planes) ?
+                       znssd_data->num_channels : znssd_data->num_planes;
+  int display_height = (height - row - 10) / 2;
+  if (display_height < 5) display_height = 5;
+
+  if (max_items > (uint64_t)display_height) {
+    wattron(win, A_DIM);
+    mvwprintw(win, height - 2, col, "Showing items %d-%d of %llu (scroll to see more)",
+              interference_scroll_offset,
+              interference_scroll_offset + display_height - 1,
+              (unsigned long long)max_items);
+    wattroff(win, A_DIM);
+  }
+
+  return 0;
+}
+
+/**
  * Clean up resources used by ZNS view
  */
 static void view_zns_cleanup(void) {
   // Clean up any resources
   view_zns_initialized = 0;
   show_all_zones = 0;
+  show_interference = 0;
   zone_scroll_offset = 0;
+  interference_scroll_offset = 0;
 }

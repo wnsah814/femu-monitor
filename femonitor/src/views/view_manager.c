@@ -81,6 +81,11 @@ void view_manager_register_views(femonitor_mode_t mode) {
     case MODE_BBSSD:
       available_views[VIEW_LINE] = NULL;
       break;
+    case MODE_ZNSSD:
+      // ZNS-only mode: disable CNS view and line view
+      available_views[VIEW_CNS] = NULL;
+      available_views[VIEW_LINE] = NULL;
+      break;
     case MODE_MULTI:
       available_views[VIEW_DASHBOARD] = NULL;
       available_views[VIEW_LINE] = NULL;
@@ -262,6 +267,9 @@ void view_manager_draw_header(WINDOW *win, device_manager_t *manager,
   switch (manager->mode) {
     case MODE_BBSSD:
       mode_str = "BBSSD";
+      break;
+    case MODE_ZNSSD:
+      mode_str = "ZNSSD";
       break;
     case MODE_MULTI:
       mode_str = "BBSSD+ZNSSD";

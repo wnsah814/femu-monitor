@@ -521,7 +521,7 @@ static int bbssd_log_record_data(device_manager_t *manager) {
   assert(log_state.common.log_file != NULL);
 
   // Write BBSSD metrics to CSV
-  fprintf(log_state.common.log_file, "%s,%.3f,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%.2f\n",
+  fprintf(log_state.common.log_file, "%s,%.9f,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%.2f\n",
           timestamp, elapsed_sec, total_lines, free_lines, victim_lines,
           full_lines, total_ipc, total_vpc, wp_line, data->gc_count, data->gc_pgs, bbssd_utilization_pct);
 
@@ -633,7 +633,7 @@ int multi_log_start_recording(device_manager_t *manager) {
       }
     }
 
-    // 모드에 따라 다른 파일명 사용
+    // file name depends on the mode
     const char *mode_str = (log_state.szone_log_mode == SZONE_LOG_INDIVIDUAL)
                                ? "multi_individual"
                                : "multi_aggregate";
@@ -797,7 +797,7 @@ static int multi_log_record_data(device_manager_t *manager) {
     assert(log_state.common.log_file != NULL);
 
     // Write to CSV file
-    fprintf(log_state.common.log_file, "%s,%.3f,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%.2f,",
+    fprintf(log_state.common.log_file, "%s,%.9f,%d,%d,%d,%d,%d,%d,%d,%lu,%lu,%.2f,",
             timestamp, elapsed_sec, total_lines, bbssd_count, free_lines,
             victim_lines, full_lines, total_ipc, total_vpc, gc_count, gc_pgs,
             bbssd_utilization_pct);

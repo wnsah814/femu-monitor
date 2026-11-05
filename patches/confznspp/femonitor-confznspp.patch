@@ -1,0 +1,1445 @@
+diff --git a/hw/femu/femon_protocol.h b/hw/femu/femon_protocol.h
+new file mode 100644
+index 000000000..ecb67fc2d
+--- /dev/null
++++ b/hw/femu/femon_protocol.h
+@@ -0,0 +1,211 @@
++/*
++ * femon_protocol.h — the femonitor <-> FEMU monitoring protocol
++ *
++ * The single definition included by both the device (femu/hw/femu) and the
++ * host tool (femonitor). The structures here are the wire format of the
++ * admin command payloads, so add or change fields only in this file and
++ * rebuild both sides. Sizes are pinned by _Static_assert.
++ *
++ * Typedef names keep the ones the host tool has always used
++ * (bbssd_*_t / znssd_*_t); new device-side code uses the same names.
++ */
++#ifndef FEMON_PROTOCOL_H
++#define FEMON_PROTOCOL_H
++
++#include <stdint.h>
++
++/* ---------------------------------------------------------- admin opcodes */
++#define NVME_ADM_CMD_FEMON_RESET  0xD4 /* clear all registered cumulative counters
++                                        * and histograms (gauges and state kept) */
++#ifndef FEMON_NO_DEVTYPE_MACRO
++#define NVME_ADM_CMD_DEVTYPE     0xD0  /* device type and geometry */
++#endif
++#define NVME_ADM_CMD_FEMON_SCHEMA 0xD1 /* registry schema (self-describing) */
++#define NVME_ADM_CMD_FEMON_FETCH  0xD2 /* registry values (all or one) */
++#define NVME_ADM_CMD_FEMON_TRACE  0xD3 /* tracepoint histograms on/off
++                                        * cdw11 = 1 (on) / 0 (off),
++                                        * cdw12 = FEMON_SEL_ALL or a metric id */
++
++/* ------------------------------------------------------------ device type */
++typedef uint64_t femon_device_type_t;
++enum {
++    FEMON_DEVICE_BBSSD = 0,
++    FEMON_DEVICE_ZNSSD = 1,
++};
++
++/* ------------------------------------------------- 0xD0: device info */
++typedef struct {
++    femon_device_type_t type;
++    union {
++        struct {
++            int secsz;        int secs_per_pg;  int pgs_per_blk;
++            int blks_per_pl;  int pls_per_lun;  int luns_per_ch;
++            int nchs;         int secs_per_blk; int secs_per_pl;
++            int secs_per_lun; int secs_per_ch;  int tt_secs;
++            int pgs_per_pl;   int pgs_per_lun;  int pgs_per_ch;
++            int tt_pgs;       int blks_per_lun; int blks_per_ch;
++            int tt_blks;      int secs_per_line; int pgs_per_line;
++            int blks_per_line; int tt_lines;    int pls_per_ch;
++            int tt_pls;       int tt_luns;
++        } bbssd;
++        struct {
++            uint64_t num_ch;
++            uint64_t num_lun;
++            uint64_t nr_zones;
++            uint64_t num_planes;     /* total number of planes */
++            uint64_t planes_per_die;
++            uint64_t dies_per_chip;
++        } znssd;
++    };
++} femon_device_info_t;
++
++/* ------------------------------------------------- femonitor view model: BBSSD
++ * Not a wire format. The client rebuilds these from the 0xD2 values of the
++ * bbssd.* metrics and hands them to the views. */
++typedef struct {
++    int curline_id;
++    int ch;
++    int lun;
++    int pg;
++    int blk;
++    int pl;
++} bbssd_write_pointer_info_t;
++
++typedef struct {
++    int id;
++    int ipc;
++    int vpc;
++    uint64_t pos;   /* position in the victim priority queue */
++} bbssd_line_info_t;
++
++typedef struct {
++    bbssd_write_pointer_info_t wp_info;
++    uint64_t gc_count;
++    uint64_t gc_pgs;
++    int tt_lines;
++    int free_line_cnt;
++    int victim_line_cnt;
++    int full_line_cnt;
++} bbssd_monitor_header_t;
++
++/* ------------------------------------------------- femonitor view model: ZNS
++ * Not a wire format. The client rebuilds these from the 0xD2 values of the
++ * zns.* metrics and hands them to the views. */
++typedef struct {
++    uint8_t  zt;    /* zone type */
++    uint8_t  zs;    /* zone state */
++    uint8_t  za;    /* zone attributes */
++    uint64_t zcap;
++    uint64_t zslba;
++    uint64_t wp;
++} znssd_zone_descr_info_t;
++
++typedef struct {
++    znssd_zone_descr_info_t d;
++    uint64_t w_ptr;
++    uint64_t cnt_reset;  /* cumulative resets of this zone */
++} znssd_zone_info_t;
++
++typedef struct {
++    uint64_t total_xfer_count;   /* NAND page transfers */
++    uint64_t conflict_count;
++    uint64_t total_wait_time_ns;
++} znssd_channel_stat_t;
++
++typedef struct {
++    uint64_t total_io_count;
++    uint64_t conflict_count;
++    uint64_t total_wait_time_ns;
++} znssd_plane_stat_t;
++
++typedef struct {
++    uint64_t num_zones;
++    uint64_t zr_count;      /* cumulative zone resets, all zones */
++    uint64_t num_channels;
++    uint64_t num_planes;
++    /* write cache statistics, counted per write command.
++     * hit  : a cache is bound to the request's zone and absorbs it
++     * miss : no cache bound to the zone (including taking a free one)
++     * evict: misses that took another zone's cache and paid its flush
++     * flush: all flushes to NAND (evictions + full caches) */
++    uint64_t wc_hit;
++    uint64_t wc_miss;
++    uint64_t wc_evict;
++    uint64_t wc_flush;
++} znssd_monitor_header_t;
++
++/* ------------------------------------------- 0xD1/0xD2: metric registry
++ *
++ * Registration-based metric protocol with a self-describing payload: the
++ * host first reads the schema with 0xD1 (which metrics exist and how many
++ * values each has), and uses it to size and decode the 0xD2 payload. A
++ * metric newly registered in the device (femon_registry.h) appears in the
++ * schema without any change to the host tool.
++ *
++ * 0xD1 SCHEMA: cdw10 = NUMD (buffer dwords - 1).
++ *   payload = femon_schema_hdr_t + femon_schema_rec_t[count]
++ * 0xD2 FETCH:  cdw10 = NUMD, cdw11 = selector
++ *   (FEMON_SEL_ALL = all, otherwise that one id).
++ *   payload = femon_fetch_hdr_t + { femon_fetch_rec_t + uint64_t[nvals] }*
++ *   version must match the schema generation; if not, the host re-reads. */
++
++#define FEMON_SEL_ALL   0xFFFFFFFFu
++
++enum {
++    FEMON_MT_U64  = 0,   /* cumulative counter or gauge, u64 (scalar or array) */
++    FEMON_MT_HIST = 1,   /* log2 histogram buckets (tracepoints) */
++};
++
++/* FEMON_MT_HIST payload: dims[0] = FEMON_HIST_NVALS u64 values.
++ * The first FEMON_HIST_BUCKETS are log2 buckets in µs (bucket i =
++ * [2^i, 2^(i+1)) µs, i = 0 is [0, 2) µs, the last has no upper bound); the
++ * last 4 are n, sum, min, max in ns (buckets show the order of magnitude,
++ * the statistics keep full precision; the renderer converts). Buckets alone
++ * would put the mean within a factor of 2, so the exact statistics travel
++ * with them. Invariant: sum of buckets == n. */
++#define FEMON_HIST_BUCKETS 16
++#define FEMON_HIST_NVALS   (FEMON_HIST_BUCKETS + 4)
++
++#define FEMON_MAX_DIMS  3
++#define FEMON_NAME_LEN  48   /* including NUL */
++
++typedef struct {
++    uint32_t version;    /* schema generation (bumped on every registration) */
++    uint32_t count;      /* number of records that follow */
++} femon_schema_hdr_t;
++
++typedef struct {
++    uint16_t id;
++    uint8_t  type;                     /* FEMON_MT_* */
++    uint8_t  ndims;                    /* 0 = scalar */
++    uint32_t dims[FEMON_MAX_DIMS];     /* the first ndims are valid */
++    char     name[FEMON_NAME_LEN];     /* NUL-terminated, <subsys>.<obj>.<metric> */
++} femon_schema_rec_t;
++
++typedef struct {
++    uint32_t version;
++    uint32_t count;
++} femon_fetch_hdr_t;
++
++typedef struct {
++    uint16_t id;
++    uint16_t rsvd;
++    uint32_t nvals;      /* uint64_t values that follow (= product of dims) */
++} femon_fetch_rec_t;
++
++/* ------------------------------------------------- pinned wire format */
++_Static_assert(sizeof(bbssd_write_pointer_info_t) == 24, "bb wp_info layout");
++_Static_assert(sizeof(bbssd_line_info_t) == 24, "bb line_info layout");
++_Static_assert(sizeof(bbssd_monitor_header_t) == 56, "bb monitor header layout");
++_Static_assert(sizeof(znssd_zone_descr_info_t) == 32, "zns zone descr layout");
++_Static_assert(sizeof(znssd_zone_info_t) == 48, "zns zone info layout");
++_Static_assert(sizeof(znssd_channel_stat_t) == 24, "zns channel stat layout");
++_Static_assert(sizeof(znssd_plane_stat_t) == 24, "zns plane stat layout");
++_Static_assert(sizeof(znssd_monitor_header_t) == 64, "zns monitor header layout");
++_Static_assert(sizeof(femon_device_info_t) == 112, "device info layout");
++_Static_assert(sizeof(femon_schema_hdr_t) == 8, "femon schema hdr layout");
++_Static_assert(sizeof(femon_schema_rec_t) == 64, "femon schema rec layout");
++_Static_assert(sizeof(femon_fetch_hdr_t) == 8, "femon fetch hdr layout");
++_Static_assert(sizeof(femon_fetch_rec_t) == 8, "femon fetch rec layout");
++
++#endif /* FEMON_PROTOCOL_H */
+diff --git a/hw/femu/femon_registry.c b/hw/femu/femon_registry.c
+new file mode 100644
+index 000000000..af6f457b0
+--- /dev/null
++++ b/hw/femu/femon_registry.c
+@@ -0,0 +1,233 @@
++/*
++ * femon_registry.c — registration-based monitoring metric registry
++ */
++#include "qemu/osdep.h"
++#include <string.h>
++#include "femon_registry.h"
++
++femon_registry_t *femon_registry_new(void)
++{
++    return g_malloc0(sizeof(femon_registry_t));
++}
++
++static femon_metric_t *femon_alloc_metric(femon_registry_t *reg,
++                                          const char *name)
++{
++    femon_metric_t *m;
++
++    if (reg->count >= FEMON_REG_MAX_METRICS) {
++        return NULL;
++    }
++    m = &reg->m[reg->count];
++    if (strlen(name) >= FEMON_NAME_LEN) {
++        return NULL;
++    }
++    g_strlcpy(m->name, name, sizeof(m->name));
++    reg->count++;
++    reg->version++;
++    return m;
++}
++
++int femon_register_u64(femon_registry_t *reg, const char *name, uint64_t *ptr)
++{
++    femon_metric_t *m = femon_alloc_metric(reg, name);
++
++    if (!m) {
++        return -1;
++    }
++    m->type = FEMON_MT_U64;
++    m->ndims = 0;
++    m->nvals = 1;
++    m->ptr = ptr;
++    return 0;
++}
++
++int femon_register_arr(femon_registry_t *reg, const char *name, uint8_t type,
++                       uint8_t ndims, const uint32_t *dims,
++                       femon_fill_fn fill, void *opaque)
++{
++    femon_metric_t *m;
++    uint32_t nvals = 1;
++    int i;
++
++    if (ndims == 0 || ndims > FEMON_MAX_DIMS || !fill) {
++        return -1;
++    }
++    m = femon_alloc_metric(reg, name);
++    if (!m) {
++        return -1;
++    }
++    m->type = type;
++    m->ndims = ndims;
++    for (i = 0; i < ndims; i++) {
++        m->dims[i] = dims[i];
++        nvals *= dims[i];
++    }
++    m->nvals = nvals;
++    m->fill = fill;
++    m->opaque = opaque;
++    return 0;
++}
++
++void femon_hist_record_slow(femon_hist_t *h, uint64_t ns)
++{
++    uint64_t us = ns / 1000;
++    int idx = us ? (63 - __builtin_clzll(us)) : 0;
++
++    if (idx >= FEMON_HIST_BUCKETS) {
++        idx = FEMON_HIST_BUCKETS - 1;
++    }
++    h->bucket[idx]++;
++    if (h->n == 0 || ns < h->min) {
++        h->min = ns;
++    }
++    if (ns > h->max) {
++        h->max = ns;
++    }
++    h->n++;
++    h->sum += ns;
++}
++
++int femon_register_hist(femon_registry_t *reg, const char *name,
++                        femon_hist_t *h)
++{
++    femon_metric_t *m = femon_alloc_metric(reg, name);
++
++    if (!m) {
++        return -1;
++    }
++    m->type = FEMON_MT_HIST;
++    m->ndims = 1;
++    m->dims[0] = FEMON_HIST_NVALS;
++    m->nvals = FEMON_HIST_NVALS;
++    m->ptr = h->bucket;   /* bucket..max exposed contiguously (see the header) */
++    m->hist = h;
++    return 0;
++}
++
++void femon_registry_trace_ctl(femon_registry_t *reg, uint32_t sel, int enable)
++{
++    uint32_t i;
++
++    for (i = 0; i < reg->count; i++) {
++        if (reg->m[i].hist && (sel == FEMON_SEL_ALL || sel == i)) {
++            reg->m[i].hist->enabled = enable ? 1 : 0;
++        }
++    }
++}
++
++void femon_registry_reset_hists(femon_registry_t *reg)
++{
++    uint32_t i;
++
++    for (i = 0; i < reg->count; i++) {
++        femon_hist_t *h = reg->m[i].hist;
++
++        if (h) {
++            /* keep enabled; zero from bucket through the statistics */
++            memset(h->bucket, 0, sizeof(*h) - offsetof(femon_hist_t, bucket));
++        }
++    }
++}
++
++size_t femon_schema_bytes(const femon_registry_t *reg)
++{
++    return sizeof(femon_schema_hdr_t) +
++           (size_t)reg->count * sizeof(femon_schema_rec_t);
++}
++
++void femon_schema_encode(const femon_registry_t *reg, uint8_t *buf)
++{
++    femon_schema_hdr_t *hdr = (femon_schema_hdr_t *)buf;
++    femon_schema_rec_t *rec = (femon_schema_rec_t *)(buf + sizeof(*hdr));
++    uint32_t i, d;
++
++    hdr->version = reg->version;
++    hdr->count = reg->count;
++    for (i = 0; i < reg->count; i++) {
++        const femon_metric_t *m = &reg->m[i];
++
++        memset(&rec[i], 0, sizeof(rec[i]));
++        rec[i].id = i;
++        rec[i].type = m->type;
++        rec[i].ndims = m->ndims;
++        for (d = 0; d < m->ndims; d++) {
++            rec[i].dims[d] = m->dims[d];
++        }
++        g_strlcpy(rec[i].name, m->name, sizeof(rec[i].name));
++    }
++}
++
++size_t femon_fetch_bytes(const femon_registry_t *reg, uint32_t sel)
++{
++    size_t sz = sizeof(femon_fetch_hdr_t);
++    uint32_t i;
++
++    for (i = 0; i < reg->count; i++) {
++        if (sel != FEMON_SEL_ALL && sel != i) {
++            continue;
++        }
++        sz += sizeof(femon_fetch_rec_t) +
++              (size_t)reg->m[i].nvals * sizeof(uint64_t);
++    }
++    return sz;
++}
++
++void femon_fetch_encode(const femon_registry_t *reg, uint32_t sel,
++                        uint8_t *buf)
++{
++    femon_fetch_hdr_t *hdr = (femon_fetch_hdr_t *)buf;
++    uint8_t *p = buf + sizeof(*hdr);
++    uint32_t i, n = 0;
++
++    for (i = 0; i < reg->count; i++) {
++        const femon_metric_t *m = &reg->m[i];
++        femon_fetch_rec_t *rec;
++        uint64_t *vals;
++
++        if (sel != FEMON_SEL_ALL && sel != i) {
++            continue;
++        }
++        rec = (femon_fetch_rec_t *)p;
++        rec->id = i;
++        rec->rsvd = 0;
++        rec->nvals = m->nvals;
++        vals = (uint64_t *)(p + sizeof(*rec));
++        if (m->ptr) {
++            uint32_t v;
++
++            /* statistics read without synchronizing with the writer: a relaxed
++             * load only stops the compiler from hoisting or caching it (free on x86-64) */
++            for (v = 0; v < m->nvals; v++) {
++                vals[v] = __atomic_load_n(&m->ptr[v], __ATOMIC_RELAXED);
++            }
++        } else {
++            m->fill(m->opaque, vals);
++        }
++        p += sizeof(*rec) + (size_t)m->nvals * sizeof(uint64_t);
++        n++;
++    }
++    hdr->version = reg->version;
++    hdr->count = n;
++}
++
++void femon_registry_set_reset_hook(femon_registry_t *reg,
++                                   void (*hook)(void *), void *opaque)
++{
++    reg->reset_hook = hook;
++    reg->reset_opaque = opaque;
++}
++
++void femon_registry_reset(femon_registry_t *reg)
++{
++    for (uint32_t i = 0; i < reg->count; i++) {
++        femon_metric_t *m = &reg->m[i];
++        if (m->type == FEMON_MT_U64 && m->ptr) {
++            memset(m->ptr, 0, (size_t)m->nvals * sizeof(uint64_t));
++        }
++    }
++    femon_registry_reset_hists(reg);
++    if (reg->reset_hook) {
++        reg->reset_hook(reg->reset_opaque);
++    }
++}
+diff --git a/hw/femu/femon_registry.h b/hw/femu/femon_registry.h
+new file mode 100644
+index 000000000..f940b2d2c
+--- /dev/null
++++ b/hw/femu/femon_registry.h
+@@ -0,0 +1,105 @@
++/*
++ * femon_registry.h — registration-based monitoring metric registry
++ *
++ * A backend (FTL) registers metrics by name at init; the host tool then
++ * reads their schema and values, self-described, through 0xD1/0xD2
++ * (femon_protocol.h). Exposing a new metric takes one registration line and
++ * no change to the protocol or the host tool.
++ *
++ * Threading: registration happens only in realize (single thread). Queries
++ * read the counters asynchronously from the admin path; for statistics a
++ * torn read is limited to one u64, so no lock is taken.
++ */
++#ifndef FEMON_REGISTRY_H
++#define FEMON_REGISTRY_H
++
++#include <stdint.h>
++#include <stddef.h>
++#include "femon_protocol.h"
++
++#define FEMON_REG_MAX_METRICS 64
++
++/* array or derived metrics: write exactly nvals u64 values to out */
++typedef void (*femon_fill_fn)(void *opaque, uint64_t *out);
++
++/* ---- static tracepoints: in-place log2 histograms ----
++ * Lock-free, assuming a single writer (the one thread that runs the path).
++ * When disabled the cost is one inlined, predictable branch (the "disabled
++ * probe effect ~0" principle of DTrace); recording goes to an out-of-line
++ * slow path so more tracepoints do not pollute the hot-path i-cache.
++ * bucket through max are laid out contiguously and go on the wire as is
++ * (the FEMON_HIST_NVALS layout in femon_protocol.h). */
++typedef struct femon_hist {
++    uint64_t enabled;                        /* switched at run time by 0xD3 */
++    uint64_t bucket[FEMON_HIST_BUCKETS];     /* log2 µs */
++    uint64_t n;                              /* exact statistics below, in ns */
++    uint64_t sum;
++    uint64_t min;
++    uint64_t max;
++} femon_hist_t;
++
++void femon_hist_record_slow(femon_hist_t *h, uint64_t ns);
++
++static inline void femon_hist_record(femon_hist_t *h, uint64_t ns)
++{
++    if (__builtin_expect(!h->enabled, 1)) {
++        return;
++    }
++    femon_hist_record_slow(h, ns);
++}
++
++typedef struct femon_metric {
++    char     name[FEMON_NAME_LEN];
++    uint8_t  type;                  /* FEMON_MT_* */
++    uint8_t  ndims;
++    uint32_t dims[FEMON_MAX_DIMS];
++    uint32_t nvals;                 /* product of dims (scalar = 1) */
++    uint64_t *ptr;                  /* direct view of a contiguous u64 array (or fill) */
++    femon_fill_fn fill;
++    void     *opaque;
++    femon_hist_t *hist;             /* FEMON_MT_HIST: the histogram 0xD3 controls */
++} femon_metric_t;
++
++typedef struct femon_registry {
++    uint32_t version;               /* bumped on every registration: schema generation */
++    uint32_t count;
++    femon_metric_t m[FEMON_REG_MAX_METRICS];
++    /* backend hook for 0xD4 RESET: zeroes scattered counters (e.g. the sources of fill arrays) */
++    void (*reset_hook)(void *opaque);
++    void *reset_opaque;
++} femon_registry_t;
++
++femon_registry_t *femon_registry_new(void);
++
++/* scalar u64 counter: exposed by pointer */
++int femon_register_u64(femon_registry_t *reg, const char *name, uint64_t *ptr);
++
++/* array metric: the fill callback writes nvals (= product of dims) values at query time */
++int femon_register_arr(femon_registry_t *reg, const char *name, uint8_t type,
++                       uint8_t ndims, const uint32_t *dims,
++                       femon_fill_fn fill, void *opaque);
++
++/* histogram: buckets exposed by pointer, and registered for 0xD3 on/off */
++int femon_register_hist(femon_registry_t *reg, const char *name,
++                        femon_hist_t *h);
++
++/* 0xD3: turn on/off the histograms selected by sel (FEMON_SEL_ALL or an id) */
++void femon_registry_trace_ctl(femon_registry_t *reg, uint32_t sel, int enable);
++
++/* zero the buckets of every registered histogram */
++void femon_registry_reset_hists(femon_registry_t *reg);
++
++/* 0xD4 RESET: zero pointer-exposed u64 counters (scalar and array), clear histograms,
++ * and call the backend reset_hook. Fill-callback metrics (gauges, state) are untouched. */
++void femon_registry_reset(femon_registry_t *reg);
++void femon_registry_set_reset_hook(femon_registry_t *reg,
++                                   void (*hook)(void *), void *opaque);
++
++/* 0xD1/0xD2 payload encoding (used by nvme-admin.c) */
++size_t femon_schema_bytes(const femon_registry_t *reg);
++void   femon_schema_encode(const femon_registry_t *reg, uint8_t *buf);
++size_t femon_fetch_bytes(const femon_registry_t *reg, uint32_t sel);
++void   femon_fetch_encode(const femon_registry_t *reg, uint32_t sel,
++                          uint8_t *buf);
++
++#endif /* FEMON_REGISTRY_H */
+diff --git a/hw/femu/femu.c b/hw/femu/femu.c
+index 6d276c56c..42c04c19d 100644
+--- a/hw/femu/femu.c
++++ b/hw/femu/femu.c
+@@ -758,6 +758,7 @@ static Property femu_props[] = {
+     // ZNS modes
+     DEFINE_PROP_UINT8("zns_allow_partial_resets", FemuCtrl, zns_params.allow_partial_zone_resets, 1),
+     DEFINE_PROP_UINT8("zns_asynchronous_resets", FemuCtrl, zns_params.asynchronous_resets, 1),
++    DEFINE_PROP_UINT8("zns_ch_backfill", FemuCtrl, zns_params.ch_backfill, 0),
+     // ZNS VTable mode (0 == direct, 1 == lazy)
+     DEFINE_PROP_UINT8("zns_vtable_mode", FemuCtrl, zns_params.vtable_mode, 0),
+     // End
+diff --git a/hw/femu/meson.build b/hw/femu/meson.build
+index e24482154..e0492240a 100644
+--- a/hw/femu/meson.build
++++ b/hw/femu/meson.build
+@@ -1 +1 @@
+-softmmu_ss.add(when: 'CONFIG_FEMU_PCI', if_true: files('dma.c', 'intr.c', 'nvme-util.c', 'nvme-admin.c', 'nvme-io.c', 'femu.c', 'nossd/nop.c', 'nand/nand.c', 'timing-model/timing.c', 'ocssd/oc12.c', 'ocssd/oc20.c', 'zns/zns.c', 'bbssd/bb.c', 'bbssd/ftl.c', 'lib/pqueue.c', 'lib/rte_ring.c', 'backend/dram.c'))
++softmmu_ss.add(when: 'CONFIG_FEMU_PCI', if_true: files('dma.c', 'intr.c', 'nvme-util.c', 'nvme-admin.c', 'nvme-io.c', 'femu.c', 'femon_registry.c', 'nossd/nop.c', 'nand/nand.c', 'timing-model/timing.c', 'ocssd/oc12.c', 'ocssd/oc20.c', 'zns/zns.c', 'bbssd/bb.c', 'bbssd/ftl.c', 'lib/pqueue.c', 'lib/rte_ring.c', 'backend/dram.c'))
+diff --git a/hw/femu/nvme-admin.c b/hw/femu/nvme-admin.c
+index 476d4fd42..71f672e66 100644
+--- a/hw/femu/nvme-admin.c
++++ b/hw/femu/nvme-admin.c
+@@ -946,8 +946,58 @@ static uint16_t nvme_format(FemuCtrl *n, NvmeCmd *cmd)
+     return nvme_format_namespace(ns, lba_idx, meta_loc, pil, pi, sec_erase);
+ }
+ 
++
++/* ---- femon 0xD1-0xD4 (ported from the integrated tree; registry filled by zns.c) ---- */
++#include "femon_registry.h"
++static uint16_t nvme_femon_schema(FemuCtrl *n, NvmeCmd *cmd)
++{
++    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1), prp2 = le64_to_cpu(cmd->dptr.prp2);
++    uint32_t requested = (le32_to_cpu(cmd->cdw10) + 1) << 2;
++    size_t required; uint8_t *buf; uint16_t ret;
++    if (!n->femon_reg) return NVME_INVALID_OPCODE | NVME_DNR;
++    required = femon_schema_bytes(n->femon_reg);
++    if (requested < required) return NVME_INVALID_FIELD | NVME_DNR;
++    buf = g_malloc0(required); femon_schema_encode(n->femon_reg, buf);
++    ret = dma_read_prp(n, buf, required, prp1, prp2); g_free(buf); return ret;
++}
++static uint16_t nvme_femon_fetch(FemuCtrl *n, NvmeCmd *cmd)
++{
++    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1), prp2 = le64_to_cpu(cmd->dptr.prp2);
++    uint32_t requested = (le32_to_cpu(cmd->cdw10) + 1) << 2;
++    uint32_t sel = le32_to_cpu(cmd->cdw11);
++    size_t required; uint8_t *buf; uint16_t ret;
++    if (!n->femon_reg) return NVME_INVALID_OPCODE | NVME_DNR;
++    required = femon_fetch_bytes(n->femon_reg, sel);
++    if (requested < required) return NVME_INVALID_FIELD | NVME_DNR;
++    buf = g_malloc0(required); femon_fetch_encode(n->femon_reg, sel, buf);
++    ret = dma_read_prp(n, buf, required, prp1, prp2); g_free(buf); return ret;
++}
++static uint16_t nvme_femon_reset(FemuCtrl *n, NvmeCmd *cmd)
++{
++    (void)cmd;
++    if (!n->femon_reg) return NVME_INVALID_OPCODE | NVME_DNR;
++    femon_registry_reset(n->femon_reg);
++    femu_log("femonitor: monitoring statistics reset\n");
++    return NVME_SUCCESS;
++}
++static uint16_t nvme_femon_trace(FemuCtrl *n, NvmeCmd *cmd)
++{
++    uint32_t enable = le32_to_cpu(cmd->cdw11), sel = le32_to_cpu(cmd->cdw12);
++    if (!n->femon_reg) return NVME_INVALID_OPCODE | NVME_DNR;
++    femon_registry_trace_ctl(n->femon_reg, sel, enable);
++    femu_log("femon: tracepoints %s (sel=0x%x)\n", enable ? "enabled" : "disabled", sel);
++    return NVME_SUCCESS;
++}
++
+ static uint16_t nvme_admin_cmd(FemuCtrl *n, NvmeCmd *cmd, NvmeCqe *cqe)
+ {
++    switch (cmd->opcode) {
++    case NVME_ADM_CMD_FEMON_SCHEMA: return nvme_femon_schema(n, cmd);
++    case NVME_ADM_CMD_FEMON_FETCH:  return nvme_femon_fetch(n, cmd);
++    case NVME_ADM_CMD_FEMON_TRACE:  return nvme_femon_trace(n, cmd);
++    case NVME_ADM_CMD_FEMON_RESET:  return nvme_femon_reset(n, cmd);
++    default: break;
++    }
+     //inho debug
+     switch (cmd->opcode) {
+     case NVME_ADM_CMD_FEMU_DEBUG:
+diff --git a/hw/femu/nvme-io.c b/hw/femu/nvme-io.c
+index 712326e50..60c3c23e9 100644
+--- a/hw/femu/nvme-io.c
++++ b/hw/femu/nvme-io.c
+@@ -657,6 +657,8 @@ static uint16_t nvme_io_cmd_post_process(FemuCtrl *n, NvmeCmd *cmd, NvmeRequest
+         return NVME_INVALID_NSID | NVME_DNR;
+     }
+ 
++    ns = &n->namespaces[nsid - 1];
++
+     if (n->ext_ops.io_cmd) {
+         return n->ext_ops.io_cmd(n, ns, cmd, req);
+     }
+diff --git a/hw/femu/nvme.h b/hw/femu/nvme.h
+index c606f8e5d..50eadc466 100644
+--- a/hw/femu/nvme.h
++++ b/hw/femu/nvme.h
+@@ -1,4 +1,5 @@
+ #ifndef __FEMU_NVME_H
++struct femon_registry; struct femon_hist;
+ #define __FEMU_NVME_H
+ 
+ #include "qemu/osdep.h"
+@@ -387,6 +388,13 @@ enum NvmeAdminCommands {
+     NVME_ADM_CMD_CONF_DEBUG     = 0xec,
+     NVME_ADM_CMD_FEMU_DEBUG     = 0xee,
+     NVME_ADM_CMD_FEMU_FLIP      = 0xef,
++
++    /* Monitoring admin commands */
++    NVME_ADM_CMD_DEVTYPE        = 0xd0,
++    NVME_ADM_CMD_FEMON_SCHEMA   = 0xd1,
++    NVME_ADM_CMD_FEMON_FETCH    = 0xd2,
++    NVME_ADM_CMD_FEMON_TRACE    = 0xd3,
++    NVME_ADM_CMD_FEMON_RESET    = 0xd4,
+ };
+ 
+ enum NvmeIoCommands {
+@@ -1147,6 +1155,53 @@ typedef struct NvmeNamespace {
+     void *state;
+ } NvmeNamespace;
+ 
++/* Monitoring device information structure */
++typedef struct {
++    /* Device type: 0=BBSSD, 1=ZNSSD */
++    uint64_t type;
++    union {
++        /* BBSSD specific information */
++        struct {
++            int secsz;
++            int secs_per_pg;
++            int pgs_per_blk;
++            int blks_per_pl;
++            int pls_per_lun;
++            int luns_per_ch;
++            int nchs;
++            int secs_per_blk;
++            int secs_per_pl;
++            int secs_per_lun;
++            int secs_per_ch;
++            int tt_secs;
++            int pgs_per_pl;
++            int pgs_per_lun;
++            int pgs_per_ch;
++            int tt_pgs;
++            int blks_per_lun;
++            int blks_per_ch;
++            int tt_blks;
++            int secs_per_line;
++            int pgs_per_line;
++            int blks_per_line;
++            int tt_lines;
++            int pls_per_ch;
++            int tt_pls;
++            int tt_luns;
++        } bbssd;
++
++        /* ZNSSD specific information */
++        struct {
++            uint64_t num_ch;
++            uint64_t num_lun;
++            uint64_t nr_zones;
++            uint64_t num_planes;
++            uint64_t planes_per_die;
++            uint64_t dies_per_chip;
++        } znssd;
++    };
++} nvme_device_info;
++
+ #define TYPE_NVME "femu"
+ #define FEMU(obj) OBJECT_CHECK(FemuCtrl, (obj), TYPE_NVME)
+ 
+@@ -1249,6 +1304,7 @@ typedef struct ZNSParams {
+     // erasure modes
+     uint8_t allow_partial_zone_resets;
+     uint8_t asynchronous_resets;
++    uint8_t ch_backfill;   /* femon: read channel-reservation backfill model */
+     uint8_t vtable_mode; 
+     uint64_t zasl;
+ } ZNSParams;
+@@ -1275,6 +1331,8 @@ typedef struct FemuCtrl {
+ 
+     /* Coperd: ZNS FIXME */
+     struct zns      *zns;   // for ZNS Latency emualting, Inhoinno
++    struct femon_registry *femon_reg;   /* femon 0xD1-0xD4 registry (ported) */
++    struct femon_hist *femon_svc_hist;
+     QemuUUID        uuid;
+     uint32_t        zasl_bs;
+     uint8_t         zasl;
+diff --git a/hw/femu/zns/zns.c b/hw/femu/zns/zns.c
+index d74ce1ae6..6492d1545 100644
+--- a/hw/femu/zns/zns.c
++++ b/hw/femu/zns/zns.c
+@@ -4,6 +4,8 @@
+ 
+ #define ZNS_EXTERNAL_PAGE_SIZE (4 * KiB)  // Exposed through NVMe
+ #define ZNS_INTERNAL_PAGE_SIZE (16 * KiB) // Internal mapped size, the flash page size
++#include "../femon_registry.h"
++static void zns_femon_register(FemuCtrl *n);
+ #define ZNS_PAGE_PARALLELISM (ZNS_INTERNAL_PAGE_SIZE / ZNS_EXTERNAL_PAGE_SIZE) // How much parallel I/O fits in one flash page
+ #define ZNS_ZASL_SIZE_BYTES (1 * MiB)
+ #define ZNS_ZONE_SIZE_BYTES (2 * GiB)
+@@ -140,11 +142,11 @@ static inline zns_vtable_entry* zns_get_vtable_entry_by_slba(NvmeNamespace *ns,
+ static inline void zns_set_physical_zone(NvmeNamespace *ns, zns_vtable_entry *ventry, NvmeZone *zone) {
+     ventry->physical_zone = zone;
+     if (zone == NULL) {
+-        femu_err("Set zone logical %lu (%lu)-> NULL \n", 
++        femu_err("Set zone logical %u (%lu)-> NULL \n",
+             zns_get_logical_zone_idx(ns, ventry->logical_zone.d.zslba),
+             ventry->logical_zone.d.zslba);
+     } else {
+-        femu_err("Set zone logical %lu (%lu)-> physical %lu (%lu)\n", 
++        femu_err("Set zone logical %u (%lu)-> physical %u (%lu)\n",
+             zns_get_logical_zone_idx(ns, ventry->logical_zone.d.zslba),
+             ventry->logical_zone.d.zslba,
+             zns_get_logical_zone_idx(ns, ventry->physical_zone->d.zslba),
+@@ -154,9 +156,9 @@ static inline void zns_set_physical_zone(NvmeNamespace *ns, zns_vtable_entry *ve
+ 
+ 
+ static inline void zns_assign_physical_zone(FemuCtrl *n, zns_vtable_entry* ventry) {
+-    struct zns *zns = n->zns; 
+-    ZNSParams *spp = &zns->sp; 
+-    NvmeZone *physical_zone, *zone, *next;
++    struct zns *zns = n->zns;
++    ZNSParams *spp = &zns->sp;
++    NvmeZone *physical_zone;
+ 
+     if (spp->vtable_mode == 1 && ventry->status == NVME_VZONE_UNASSIGNED) {
+         // First check in free zones...
+@@ -522,7 +524,9 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
+                                       uint32_t nlb, bool append)
+ {
+     uint16_t status;
++#if MK_ZONE_CONVENTIONAL
+     uint32_t zidx = zns_get_logical_zone_idx(ns, slba);
++#endif
+     if (unlikely((slba + nlb) > zns_zone_wr_boundary(zone))) {
+         status = NVME_ZONE_BOUNDARY_ERROR;
+     } else {
+@@ -540,9 +544,11 @@ static uint16_t zns_check_zone_write(FemuCtrl *n, NvmeNamespace *ns,
+             if (zns_l2b(ns, nlb) > (n->page_size << n->zasl)) {
+                 status = NVME_INVALID_FIELD;
+             }
++#if MK_ZONE_CONVENTIONAL
+             if((zidx < MK_ZONE_CONVENTIONAL)){
+                 femu_err("[inho] zns.c:406 append wp error(%d) in zidx=%d",status, zidx);
+             }
++#endif
+         } else if (unlikely(slba != zone->w_ptr)) {
+             
+             status = NVME_ZONE_INVALID_WRITE;   
+@@ -728,6 +734,7 @@ static uint64_t zns_advance_zone_wp(NvmeNamespace *ns, zns_vtable_entry *ventry,
+ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
+ {
+     NvmeNamespace *ns = req->ns;
++    FemuCtrl *n = ns->ctrl;
+ 
+     /* FIXME, We always assume reset SUCCESS */
+     switch (zns_get_zone_state(zone)) {
+@@ -743,6 +750,8 @@ static void zns_aio_zone_reset_cb(NvmeRequest *req, NvmeZone *zone)
+         zone->w_ptr = zone->d.zslba;
+         zone->d.wp = zone->w_ptr;
+         zns_assign_zone_state(ns, zone, NVME_ZONE_STATE_EMPTY);
++        /* Increment zone reset count for monitoring */
++        n->zns->zr_count++;
+     default:
+         break;
+     }
+@@ -1087,7 +1096,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
+         } else {
+             logical_zone->w_ptr += FINISH_BLOCK_SIZE;
+             physical_zone->w_ptr += FINISH_BLOCK_SIZE;
+-            femu_err("zone->wptr %lu %lu %lu\n", logical_zone->w_ptr, physical_zone->w_ptr, FINISH_BLOCK_SIZE);
++            femu_err("zone->wptr %lu %lu %llu\n", logical_zone->w_ptr, physical_zone->w_ptr, (unsigned long long)FINISH_BLOCK_SIZE);
+         }
+         // femu_err("zone finish action:%c slba:%ld zone_idx:%d req->expire_time(%lu) - req->stime(%lu):%lu\n",
+         //    action, req->slba ,logical_zone_idx,req->expire_time,req->stime,(req->expire_time - req->stime));
+@@ -1111,7 +1120,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
+             // femu_err("Reset %lu to %lu\n", logical_zone_idx, logical_zone->w_ptr);
+             n->zvtable->entries[logical_zone_idx].physical_zone->cnt_reset += 1;
+         } else {
+-            femu_err("Erasing zone %lu\n", logical_zone_idx);
++            femu_err("Erasing zone %u\n", logical_zone_idx);
+             status = zns_do_zone_op(ns, logical_zone, proc_mask, zns_reset_zone, req);
+             ventry = zns_get_vtable_entry_by_slba(ns, slba);
+             // Mark as unused
+@@ -1123,7 +1132,7 @@ static uint16_t zns_zone_mgmt_send(FemuCtrl *n, NvmeRequest *req)
+                 zns_set_physical_zone(&n->namespaces[0], ventry, NULL);
+                 ventry->status = NVME_VZONE_UNASSIGNED;
+             } else {
+-                femu_err("Erasing already empty zone %lu\n", logical_zone_idx);
++                femu_err("Erasing already empty zone %u\n", logical_zone_idx);
+             }
+         }
+ 
+@@ -1459,11 +1468,38 @@ err:
+     return status | NVME_DNR;
+ }
+ 
+-static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
++/* ============== Monitoring Functions ============== */
++
++/* Device type identification for monitoring */
++static uint16_t zns_id_dev(FemuCtrl *n, NvmeCmd *cmd)
+ {
++    uint64_t prp1 = le64_to_cpu(cmd->dptr.prp1);
++    uint64_t prp2 = le64_to_cpu(cmd->dptr.prp2);
++    ZNSParams *spp = &n->zns->sp;
++    nvme_device_info dev_data;
++
++    memset(&dev_data, 0, sizeof(nvme_device_info));
++
++    /* type = 1 for ZNSSD */
++    dev_data.type = 1;
++
++    dev_data.znssd.num_ch = spp->nchnls;
++    dev_data.znssd.num_lun = spp->ways;
++    dev_data.znssd.nr_zones = n->num_zones;
++    dev_data.znssd.planes_per_die = spp->planes_per_die;
++    dev_data.znssd.dies_per_chip = spp->dies_per_chip;
++    dev_data.znssd.num_planes = spp->ways * spp->planes_per_die * spp->dies_per_chip * spp->nchnls;
++
++    return dma_read_prp(n, (uint8_t *)&dev_data, sizeof(nvme_device_info), prp1, prp2);
++}
++
++/* ============== End Monitoring Functions ============== */
+ 
++static uint16_t zns_admin_cmd(FemuCtrl *n, NvmeCmd *cmd)
++{
+     switch (cmd->opcode) {
+-        
++    case NVME_ADM_CMD_DEVTYPE:
++        return zns_id_dev(n, cmd);
+     default:
+         femu_err("zns_admin_cmd fallout cmd->opcode %x %d", cmd->opcode, cmd->opcode);
+         return NVME_INVALID_OPCODE | NVME_DNR;
+@@ -1480,12 +1516,63 @@ static uint16_t zns_check_dulbe(NvmeNamespace *ns, uint64_t slba, uint32_t nlb)
+     return NVME_SUCCESS;
+ }
+ 
++/*
++ * femon backfill model: a read's data-out happens once its page read ends, so it
++ * is booked as a window in the future instead of holding the channel from now.
++ * Every transfer avoids every booked window, so no two transfers share the bus.
++ * Windows that ended before the current command started can no longer be hit.
++ */
++static void zns_bus_prune(zns_ssd_channel *ch, uint64_t now)
++{
++    uint32_t i, j = 0;
++    for (i = 0; i < ch->nres; i++) {
++        if (ch->res[i][1] > now) {
++            ch->res[j][0] = ch->res[i][0];
++            ch->res[j][1] = ch->res[i][1];
++            j++;
++        }
++    }
++    ch->nres = j;
++}
++
++/* earliest s >= start such that [s, s + len) overlaps no booked window */
++static uint64_t zns_bus_fit(const zns_ssd_channel *ch, uint64_t start, uint64_t len)
++{
++    uint32_t i;
++    for (i = 0; i < ch->nres; i++) {
++        if (ch->res[i][1] <= start) {
++            continue;
++        }
++        if (ch->res[i][0] >= start + len) {
++            break;
++        }
++        start = ch->res[i][1];
++    }
++    return start;
++}
++
++static void zns_bus_book(zns_ssd_channel *ch, uint64_t start, uint64_t end)
++{
++    uint32_t i;
++    if (ch->nres == ch->res_cap) {
++        ch->res_cap = ch->res_cap ? 2 * ch->res_cap : 64;
++        ch->res = g_realloc(ch->res, (size_t)ch->res_cap * sizeof(*ch->res));
++    }
++    for (i = ch->nres; i > 0 && ch->res[i - 1][0] > start; i--) {
++        ch->res[i][0] = ch->res[i - 1][0];
++        ch->res[i][1] = ch->res[i - 1][1];
++    }
++    ch->res[i][0] = start;
++    ch->res[i][1] = end;
++    ch->nres++;
++}
++
+ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
+     //FEMU only supports 1 namespace for now (see femu.c:365)
+     //and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased
+     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+     struct NvmeNamespace *ns = req->ns;
+-    ZNSParams * spp = &zns->sp; 
++    ZNSParams * spp = &zns->sp;
+     uint64_t slba = le64_to_cpu(rw->slba);
+     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+     uint64_t currlat = 0, maxlat = 0;
+@@ -1503,6 +1590,8 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
+         slba = zone->w_ptr;
+     }
+ 
++    // printf("zns_advance_status_write: Advancing status for write at slba %lu nlb %u\n", slba, nlb);
++
+     uint64_t nand_stime = 0;
+     uint64_t cmd_stime = 0;
+ 
+@@ -1518,44 +1607,65 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
+     }
+ 
+     uint64_t step_size = (ZNS_INTERNAL_PAGE_SIZE / 512);
++    // printf("zns_advance_status_write: step_size %lu\n", step_size);
++    // printf("\ni,my_chnl_idx,my_plane_idx\n");
+     for (uint64_t i = 0; i < nlb ; i += step_size) {
+-        my_chnl_idx=zns_get_chnl_idx(ns, slba); 
+-        my_plane_idx = zns_get_plane_idx(ns, slba); 
++        my_chnl_idx=zns_get_chnl_idx(ns, slba);
++        my_plane_idx = zns_get_plane_idx(ns, slba);
++
++        // printf("%lu,%u,%u\n", i, my_chnl_idx, my_plane_idx);
+ 
+         chnl = &(zns->ch[my_chnl_idx]);
+         plane= &(zns->planes[my_plane_idx]);
+ 
+-        //pthread_spin_lock(&(chnl->time_lock));
+-        chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? \
+-            cmd_stime : chnl->next_ch_avail_time;
++        /* Track channel interference */
++        chnl->total_xfer_count++; chnl->wr_xfer_count++;
++        if (zns->ch_backfill) {
++            /* backfill model: channel busy until next_ch_avail_time (immediate transfers) and
++             * around every window booked by a read whose data arrives later; a write
++             * may use the idle gaps between them. */
++            uint64_t st = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : chnl->next_ch_avail_time;
++            zns_bus_prune(chnl, cmd_stime);
++            st = zns_bus_fit(chnl, st, spp->ch_xfer_lat);
++            if (st > cmd_stime) {
++                chnl->conflict_count++; chnl->wr_conflict++;
++                chnl->total_wait_time_ns += (st - cmd_stime); chnl->wr_wait_ns += (st - cmd_stime);
++                femon_hist_record(zns->h_wr_chwait, st - cmd_stime);
++            }
++            chnl_stime = st;
++        } else {
++            if (chnl->next_ch_avail_time > cmd_stime) {
++                chnl->conflict_count++; chnl->wr_conflict++;
++                chnl->total_wait_time_ns += (chnl->next_ch_avail_time - cmd_stime);
++                chnl->wr_wait_ns += (chnl->next_ch_avail_time - cmd_stime);
++                femon_hist_record(zns->h_wr_chwait, chnl->next_ch_avail_time - cmd_stime);
++            }
++            chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? \
++                cmd_stime : chnl->next_ch_avail_time;
++        }
+         chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+-        //pthread_spin_unlock(&(chnl->time_lock));
+ 
+-        // if (zone->w_ptr - zone->d.zslba < 64*4) {
+-        //     femu_err("TESTINGA %lu %lu %lu  -- time %lu %li (idle %lu)", slba, my_chnl_idx, my_plane_idx, 
+-        //         chnl_stime - cmd_stime, (plane->next_avail_time < cmd_stime) ? 0  : \
+-        //         plane->next_avail_time - cmd_stime, 
+-        //         (plane->next_avail_time < cmd_stime) ? cmd_stime - plane->next_avail_time  : \
+-        //         0);
+-        // }
++        /* Track plane interference */
++        plane->total_io_count++; plane->wr_io_count++;
++        if (plane->next_avail_time > chnl->next_ch_avail_time) {
++            plane->conflict_count++; plane->wr_conflict++;
++            plane->total_wait_time_ns += (plane->next_avail_time - chnl->next_ch_avail_time);
++            plane->wr_wait_ns += (plane->next_avail_time - chnl->next_ch_avail_time);
++        }
+ 
+         nand_stime = (plane->next_avail_time < chnl->next_ch_avail_time) ? chnl->next_ch_avail_time : \
+             plane->next_avail_time;
+         plane->next_avail_time = nand_stime + spp->pg_wr_lat;
+-        
++
+         currlat = plane->next_avail_time - cmd_stime;
+         maxlat = (maxlat < currlat) ? currlat : maxlat;
+-        
+-        // if (zone->w_ptr - zone->d.zslba < 64*4) {
+-        //     femu_err(" %lu %lu TESTINGB %lu %lu \n?", currlat, maxlat, chnl->next_ch_avail_time - cmd_stime,
+-        //          plane->next_avail_time -cmd_stime);
+-        // }
+-        
++
+         slba += step_size;
+     }
+ 
+     chnl = &(zns->ch[0]);
+     pthread_spin_unlock(&(chnl->time_lock));
++    femon_hist_record(zns->h_wr_lat, maxlat);
+ 
+     if (zone->w_ptr - zone->d.zslba < 1024) {
+         // femu_err("Write lat %lu %lu\n", zone->w_ptr, maxlat);
+@@ -1567,14 +1677,14 @@ static uint64_t zns_advance_status_write(ZNS *zns, NvmeRequest *req){
+ }
+ 
+ static uint64_t zns_advance_status_read(ZNS *zns, NvmeRequest *req){
+-    // FEMU only supports 1 namespace for now (see femu.c:365) 
+-    // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased 
++    // FEMU only supports 1 namespace for now (see femu.c:365)
++    // and FEMU ZNS Extension use a single thread which mean lockless operations(ch->available_time += ~~) if thread increased
+ 
+     NvmeRwCmd *rw = (NvmeRwCmd *)&req->cmd;
+     uint64_t slba = le64_to_cpu(rw->slba);
+     uint32_t nlb = (uint32_t)le16_to_cpu(rw->nlb) + 1;
+     struct NvmeNamespace *ns = req->ns;
+-    ZNSParams * spp = &zns->sp; 
++    ZNSParams * spp = &zns->sp;
+     //zns_ssd_lun *chip = NULL;
+     zns_ssd_plane *plane = NULL;
+     uint64_t currlat = 0, maxlat= 0;
+@@ -1591,25 +1701,58 @@ static uint64_t zns_advance_status_read(ZNS *zns, NvmeRequest *req){
+     // 8:4K 32:16K 64:32K 128:64K
+     uint64_t step_size = (ZNS_INTERNAL_PAGE_SIZE / 512);
+     for (uint64_t i = 0; i < nlb; i += step_size) {
+-        my_chnl_idx = zns_get_chnl_idx(ns, slba); 
++        my_chnl_idx = zns_get_chnl_idx(ns, slba);
+         my_plane_idx = zns_get_plane_idx(ns, slba);
+         chnl = &(zns->ch[my_chnl_idx]);
+         plane= &(zns->planes[my_plane_idx]);
+ 
++        /* Track plane interference for read */
++        plane->total_io_count++; plane->rd_io_count++;
++        if (plane->next_avail_time > cmd_stime) {
++            plane->conflict_count++; plane->rd_conflict++;
++            plane->total_wait_time_ns += (plane->next_avail_time - cmd_stime);
++            plane->rd_wait_ns += (plane->next_avail_time - cmd_stime);
++        }
++
+         //Inhoinno:  Single thread emulation so assume we dont need lock per chnl
+         nand_stime = (plane->next_avail_time < cmd_stime) ? cmd_stime : \
+                      plane->next_avail_time;
+         plane->next_avail_time = nand_stime + spp->pg_rd_lat;
+ 
+-        chnl_stime = (chnl->next_ch_avail_time < plane->next_avail_time) ? \
+-            plane->next_avail_time : chnl->next_ch_avail_time;
+-        chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+-
+-        currlat = chnl->next_ch_avail_time - cmd_stime;
++        /* Track channel interference for read */
++        chnl->total_xfer_count++; chnl->rd_xfer_count++;
++        if (zns->ch_backfill) {
++            /* data transfer happens when the page read completes: reserve the channel only
++             * for that window instead of blocking it from now until then. */
++            uint64_t t = plane->next_avail_time;
++            if (t < chnl->next_ch_avail_time) t = chnl->next_ch_avail_time;
++            zns_bus_prune(chnl, cmd_stime);
++            t = zns_bus_fit(chnl, t, spp->ch_xfer_lat);
++            if (t > plane->next_avail_time) {
++                chnl->conflict_count++; chnl->rd_conflict++;
++                chnl->total_wait_time_ns += (t - plane->next_avail_time);
++                chnl->rd_wait_ns += (t - plane->next_avail_time);
++            }
++            zns_bus_book(chnl, t, t + spp->ch_xfer_lat);
++            femon_hist_record(zns->h_rd_chdefer, t + spp->ch_xfer_lat - cmd_stime);
++            currlat = t + spp->ch_xfer_lat - cmd_stime;
++        } else {
++            if (chnl->next_ch_avail_time > plane->next_avail_time) {
++                chnl->conflict_count++; chnl->rd_conflict++;
++                chnl->total_wait_time_ns += (chnl->next_ch_avail_time - plane->next_avail_time);
++                chnl->rd_wait_ns += (chnl->next_ch_avail_time - plane->next_avail_time);
++            }
++            chnl_stime = (chnl->next_ch_avail_time < plane->next_avail_time) ? \
++                plane->next_avail_time : chnl->next_ch_avail_time;
++            chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
++            /* how far this read pushed the channel timeline beyond now (convoy seed) */
++            femon_hist_record(zns->h_rd_chdefer, chnl->next_ch_avail_time - cmd_stime);
++            currlat = chnl->next_ch_avail_time - cmd_stime;
++        }
+         maxlat = (maxlat < currlat)? currlat : maxlat;
+         slba += step_size;
+     }
+-
++    femon_hist_record(zns->h_rd_lat, maxlat);
+     return maxlat;
+ }
+ 
+@@ -1671,6 +1814,10 @@ static uint64_t zns_advance_status_finish(ZNS *zns, NvmeRequest *req){
+         my_chnl_idx=zns_get_chnl_idx(ns, slba); 
+         chnl = &(zns->ch[my_chnl_idx]);
+         chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? cmd_stime : chnl->next_ch_avail_time;
++        if (zns->ch_backfill) {
++            zns_bus_prune(chnl, cmd_stime);
++            chnl_stime = zns_bus_fit(chnl, chnl_stime, spp->ch_xfer_lat);
++        }
+         chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+         lat = chnl->next_ch_avail_time - cmd_stime;
+         maxlat = (maxlat < lat) ? lat : maxlat;
+@@ -1691,6 +1838,10 @@ static uint64_t zns_advance_status_finish(ZNS *zns, NvmeRequest *req){
+ 
+         chnl_stime = (chnl->next_ch_avail_time < cmd_stime) ? \
+             cmd_stime : chnl->next_ch_avail_time;
++        if (zns->ch_backfill) {
++            zns_bus_prune(chnl, cmd_stime);
++            chnl_stime = zns_bus_fit(chnl, chnl_stime, spp->ch_xfer_lat);
++        }
+         chnl->next_ch_avail_time = chnl_stime + spp->ch_xfer_lat;
+ 
+         nand_stime = (plane->next_avail_time < chnl->next_ch_avail_time) ? chnl->next_ch_avail_time : \
+@@ -2052,6 +2203,7 @@ static void znsssd_init_params(FemuCtrl * n, ZNSParams *spp){
+ 
+     spp->allow_partial_zone_resets = spp_param->allow_partial_zone_resets;
+     spp->asynchronous_resets = spp_param->asynchronous_resets;
++    spp->ch_backfill = spp_param->ch_backfill;
+     spp->vtable_mode = spp_param->vtable_mode;
+ 
+     spp->pg_rd_lat = spp_param->pg_rd_lat;
+@@ -2114,9 +2266,15 @@ static void zns_init_ch(struct zns_ssd_channel *ch, ZNSParams *spp)
+ {
+     ch->next_ch_avail_time = 0;
+     ch->busy = 0;
++    ch->res = NULL;
++    ch->nres = ch->res_cap = 0;
++    /* Initialize interference statistics */
++    ch->total_xfer_count = 0;
++    ch->conflict_count = 0;
++    ch->total_wait_time_ns = 0;
+     int ret = pthread_spin_init(&(ch->time_lock), PTHREAD_PROCESS_SHARED);
+     if(ret)
+-        femu_err("zns.c:1754 znssd_init(): lock alloc failed, to inhoinno \n");        
++        femu_err("zns.c:1754 znssd_init(): lock alloc failed, to inhoinno \n");
+ }
+ 
+ static void zns_init_chip(struct zns_ssd_lun *ch, ZNSParams *spp)
+@@ -2134,12 +2292,17 @@ static void zns_init_plane(struct zns_ssd_plane *pl, ZNSParams *spp)
+     pl->next_avail_time=0;
+     pl->busy=false;
+     pl->nregs=spp->register_model;
++    /* Initialize interference statistics */
++    pl->total_io_count = 0;
++    pl->conflict_count = 0;
++    pl->total_wait_time_ns = 0;
+ }
+ 
+ void znsssd_init(FemuCtrl * n){
+     struct zns *zns = n->zns;
+-    ZNSParams *spp = &zns->sp; 
++    ZNSParams *spp = &zns->sp;
+     zns->namespaces = n->namespaces;
++    zns->zr_count = 0;  /* Initialize zone reset count for monitoring */
+     znsssd_init_params(n, spp);
+     uint64_t nplanes = (spp->ways * spp->planes_per_die* spp->dies_per_chip * spp->nchnls);
+     
+@@ -2168,6 +2331,94 @@ void znsssd_init(FemuCtrl * n){
+     for (uint64_t i = 0; i < nplanes; i++){
+         zns_init_plane(&zns->planes[i], spp);
+     }
++    zns_femon_register(n);
++}
++
++
++/* ============== femon registry (0xD1-0xD4), ported ============== */
++#define ZNS_FILL(name, expr) \
++    static void name(void *o, uint64_t *out) { ZNS *z = o; ZNSParams *sp = &z->sp; \
++        uint64_t nch = sp->nchnls; for (uint64_t i = 0; i < nch; i++) out[i] = (expr); }
++#define ZNS_FILLP(name, expr) \
++    static void name(void *o, uint64_t *out) { ZNS *z = o; ZNSParams *sp = &z->sp; \
++        uint64_t npl = sp->ways * sp->planes_per_die * sp->dies_per_chip * sp->nchnls; \
++        for (uint64_t i = 0; i < npl; i++) out[i] = (expr); }
++ZNS_FILL(fill_ch_xfer,     z->ch[i].total_xfer_count)
++ZNS_FILL(fill_ch_conflict, z->ch[i].conflict_count)
++ZNS_FILL(fill_ch_wait,     z->ch[i].total_wait_time_ns)
++ZNS_FILL(fill_ch_rd_xfer,  z->ch[i].rd_xfer_count)
++ZNS_FILL(fill_ch_wr_xfer,  z->ch[i].wr_xfer_count)
++ZNS_FILL(fill_ch_rd_wait,  z->ch[i].rd_wait_ns)
++ZNS_FILL(fill_ch_wr_wait,  z->ch[i].wr_wait_ns)
++ZNS_FILL(fill_ch_rd_conf,  z->ch[i].rd_conflict)
++ZNS_FILL(fill_ch_wr_conf,  z->ch[i].wr_conflict)
++ZNS_FILLP(fill_pl_io,      z->planes[i].total_io_count)
++ZNS_FILLP(fill_pl_conflict,z->planes[i].conflict_count)
++ZNS_FILLP(fill_pl_wait,    z->planes[i].total_wait_time_ns)
++ZNS_FILLP(fill_pl_rd_io,   z->planes[i].rd_io_count)
++ZNS_FILLP(fill_pl_wr_io,   z->planes[i].wr_io_count)
++ZNS_FILLP(fill_pl_rd_wait, z->planes[i].rd_wait_ns)
++ZNS_FILLP(fill_pl_wr_wait, z->planes[i].wr_wait_ns)
++ZNS_FILLP(fill_pl_rd_conf, z->planes[i].rd_conflict)
++ZNS_FILLP(fill_pl_wr_conf, z->planes[i].wr_conflict)
++static void fill_zone_reset(void *o, uint64_t *out) {
++    FemuCtrl *n = o; for (uint32_t i = 0; i < n->num_zones; i++) out[i] = n->zone_array[i].cnt_reset; }
++
++static void zns_femon_reset_hook(void *o)
++{
++    ZNS *zns = o; ZNSParams *spp = &zns->sp;
++    uint64_t nch = spp->nchnls, npl = spp->ways * spp->planes_per_die * spp->dies_per_chip * nch;
++    for (uint64_t i = 0; i < nch; i++) {
++        zns_ssd_channel *c = &zns->ch[i];
++        c->total_xfer_count = c->conflict_count = c->total_wait_time_ns = 0;
++        c->rd_xfer_count = c->wr_xfer_count = c->rd_wait_ns = c->wr_wait_ns = c->rd_conflict = c->wr_conflict = 0;
++    }
++    for (uint64_t i = 0; i < npl; i++) {
++        zns_ssd_plane *pl = &zns->planes[i];
++        pl->total_io_count = pl->conflict_count = pl->total_wait_time_ns = 0;
++        pl->rd_io_count = pl->wr_io_count = pl->rd_wait_ns = pl->wr_wait_ns = pl->rd_conflict = pl->wr_conflict = 0;
++    }
++    zns->zr_count = 0;
++}
++
++static void zns_femon_register(FemuCtrl *n)
++{
++    ZNS *zns = n->zns; ZNSParams *spp = &zns->sp;
++    uint32_t nch = spp->nchnls, npl = spp->ways * spp->planes_per_die * spp->dies_per_chip * nch;
++    uint32_t nz = n->num_zones;
++    femon_registry_t *r = femon_registry_new();
++    n->femon_reg = r;
++    zns->ch_backfill = spp->ch_backfill;
++    femon_register_u64(r, "zns.reset.count", &zns->zr_count);
++    femon_register_arr(r, "zns.zone.reset_count", FEMON_MT_U64, 1, &nz, fill_zone_reset, n);
++    femon_register_arr(r, "zns.ch.xfer_count",     FEMON_MT_U64, 1, &nch, fill_ch_xfer, zns);
++    femon_register_arr(r, "zns.ch.conflict_count", FEMON_MT_U64, 1, &nch, fill_ch_conflict, zns);
++    femon_register_arr(r, "zns.ch.wait_ns",        FEMON_MT_U64, 1, &nch, fill_ch_wait, zns);
++    femon_register_arr(r, "zns.ch.rd_xfer_count",  FEMON_MT_U64, 1, &nch, fill_ch_rd_xfer, zns);
++    femon_register_arr(r, "zns.ch.wr_xfer_count",  FEMON_MT_U64, 1, &nch, fill_ch_wr_xfer, zns);
++    femon_register_arr(r, "zns.ch.rd_wait_ns",     FEMON_MT_U64, 1, &nch, fill_ch_rd_wait, zns);
++    femon_register_arr(r, "zns.ch.wr_wait_ns",     FEMON_MT_U64, 1, &nch, fill_ch_wr_wait, zns);
++    femon_register_arr(r, "zns.ch.rd_conflict",    FEMON_MT_U64, 1, &nch, fill_ch_rd_conf, zns);
++    femon_register_arr(r, "zns.ch.wr_conflict",    FEMON_MT_U64, 1, &nch, fill_ch_wr_conf, zns);
++    femon_register_arr(r, "zns.plane.io_count",       FEMON_MT_U64, 1, &npl, fill_pl_io, zns);
++    femon_register_arr(r, "zns.plane.conflict_count", FEMON_MT_U64, 1, &npl, fill_pl_conflict, zns);
++    femon_register_arr(r, "zns.plane.wait_ns",        FEMON_MT_U64, 1, &npl, fill_pl_wait, zns);
++    femon_register_arr(r, "zns.plane.rd_io_count",    FEMON_MT_U64, 1, &npl, fill_pl_rd_io, zns);
++    femon_register_arr(r, "zns.plane.wr_io_count",    FEMON_MT_U64, 1, &npl, fill_pl_wr_io, zns);
++    femon_register_arr(r, "zns.plane.rd_wait_ns",     FEMON_MT_U64, 1, &npl, fill_pl_rd_wait, zns);
++    femon_register_arr(r, "zns.plane.wr_wait_ns",     FEMON_MT_U64, 1, &npl, fill_pl_wr_wait, zns);
++    femon_register_arr(r, "zns.plane.rd_conflict",    FEMON_MT_U64, 1, &npl, fill_pl_rd_conf, zns);
++    femon_register_arr(r, "zns.plane.wr_conflict",    FEMON_MT_U64, 1, &npl, fill_pl_wr_conf, zns);
++    zns->h_rd_lat = g_malloc0(sizeof(femon_hist_t));
++    zns->h_wr_lat = g_malloc0(sizeof(femon_hist_t));
++    zns->h_rd_chdefer = g_malloc0(sizeof(femon_hist_t));
++    zns->h_wr_chwait = g_malloc0(sizeof(femon_hist_t));
++    femon_register_hist(r, "zns.read.lat_model_us",  zns->h_rd_lat);
++    femon_register_hist(r, "zns.write.lat_model_us", zns->h_wr_lat);
++    femon_register_hist(r, "zns.read.ch_defer_us",   zns->h_rd_chdefer);
++    femon_register_hist(r, "zns.write.ch_wait_us",   zns->h_wr_chwait);
++    femon_registry_set_reset_hook(r, zns_femon_reset_hook, zns);
++    femu_log("femon: registry ready (%u metrics, backfill=%lu)\n", r->count, zns->ch_backfill);
+ }
+ 
+ static void zns_exit(FemuCtrl *n)
+diff --git a/hw/femu/zns/zns.h b/hw/femu/zns/zns.h
+index 02de5d4d6..d95f0b5bf 100644
+--- a/hw/femu/zns/zns.h
++++ b/hw/femu/zns/zns.h
+@@ -20,7 +20,7 @@ enum {
+     ZONE_RESET_LATENCY =  3000000, // ns
+ };
+ 
+-typedef struct zns_vtable_entry;
++struct zns_vtable_entry;
+ 
+ 
+ /**
+@@ -31,17 +31,32 @@ typedef struct zns_vtable_entry;
+  */
+ typedef struct zns_ssd_channel {
+     int nzones;
+-    uint64_t next_ch_avail_time; 
++    uint64_t next_ch_avail_time;
+     pthread_spinlock_t time_lock;
+     bool busy;
+ 
++    /* Interference monitoring statistics */
++    uint64_t total_xfer_count;      /* Total transfer count */
++    uint64_t rd_xfer_count, wr_xfer_count, rd_wait_ns, wr_wait_ns, rd_conflict, wr_conflict; /* femon: per-direction */
++    /* femon backfill model: data-out windows booked by reads that have not
++     * ended yet, sorted by start and non-overlapping */
++    uint64_t (*res)[2];
++    uint32_t nres, res_cap;
++    uint64_t conflict_count;        /* Count of conflicts (had to wait) */
++    uint64_t total_wait_time_ns;    /* Total wait time due to conflicts */
+ } zns_ssd_channel;
+ 
+ typedef struct zns_ssd_plane {
+-    uint64_t next_avail_time; 
++    uint64_t next_avail_time;
+     uint64_t nregs;
+     bool *is_reg_busy;
+     bool busy;
++
++    /* Interference monitoring statistics */
++    uint64_t total_io_count;        /* Total I/O operations */
++    uint64_t rd_io_count, wr_io_count, rd_wait_ns, wr_wait_ns, rd_conflict, wr_conflict; /* femon: per-direction */
++    uint64_t conflict_count;        /* Count of conflicts (had to wait for plane) */
++    uint64_t total_wait_time_ns;    /* Total wait time due to conflicts */
+ } zns_ssd_plane;
+ 
+ /**
+@@ -71,12 +86,17 @@ typedef struct zns {
+     struct zns_ssd_plane *planes;
+ 
+     /* new members for znsssd */
+-    struct NvmeNamespace *namespaces;   // FEMU only support 1 namespace 
++    struct NvmeNamespace *namespaces;   // FEMU only support 1 namespace
+     struct NvmeZone *zone_array;
+     struct zns_vtable_entry *ventry;
+     uint32_t num_zones;
+     /* lockless ring for communication with NVMe IO thread */
+ 
++    /* Monitoring statistics */
++    uint64_t zr_count;      /* Zone reset count for monitoring */
++    struct femon_hist *h_rd_lat, *h_wr_lat, *h_rd_chdefer, *h_wr_chwait; /* femon tracepoints */
++    uint64_t ch_backfill;   /* knob: 1 = reads reserve channel only at transfer time (backfill) */
++
+     QemuThread zns_thread;
+ } ZNS;
+ 
+@@ -213,7 +233,7 @@ typedef struct zns_vtable_entry {
+ } zns_vtable_entry;
+ 
+ typedef struct zns_vtable {
+-    zns_vtable_entry* entries; 
++    zns_vtable_entry* entries;
+     int number_of_zones;
+ 
+     QTAILQ_HEAD(zns_free_zones_list, NvmeZone) free_zones;
+diff --git a/run-femon.sh b/run-femon.sh
+new file mode 100755
+index 000000000..30bf6d3e6
+--- /dev/null
++++ b/run-femon.sh
+@@ -0,0 +1,54 @@
++#!/bin/bash
++#
++# run-femon.sh — boot a VM with a ConfZNS++ ZNS SSD instrumented for femonitor
++#
++# Geometry: 32 GiB, 128 MiB zones, 8 channels x 4 ways x 2 planes, page read
++# 65 us, program 450 us, channel transfer 25 us, erase 3 ms.
++#
++# Required:
++#   OSIMGF=<guest OS image, qcow2>
++# Optional:
++#   POLICY=SU|MU4|FU   zone placement (default FU)
++#                      SU = 1 channel x 1 way, MU4 = 4 channels x 1 way,
++#                      FU = 8 channels x 4 ways per zone
++#   BACKFILL=0|1       0 = a read reserves the channel from the moment it is
++#                      scheduled; 1 = transfer-only reservation (default 0)
++#   SMP, MEM           guest vCPUs and memory (default 4, 8G)
++#   SSH_PORT           host port forwarded to guest port 22 (default 8082)
++#   FEMU_CPUS          pin the whole QEMU process with taskset (e.g. 0-31)
++set -eu
++
++DIR=$(cd "$(dirname "$0")" && pwd)
++QEMU=${QEMU:-$DIR/build-femu/qemu-system-x86_64}
++[[ -x $QEMU ]] || { echo "no $QEMU: build first"; exit 1; }
++: "${OSIMGF:?set OSIMGF to the guest OS image}"
++
++case ${POLICY:-FU} in
++  SU)  CPZ=1; WPZ=1 ;;
++  MU4) CPZ=4; WPZ=1 ;;
++  FU)  CPZ=8; WPZ=4 ;;
++  *) echo "POLICY=SU|MU4|FU"; exit 1 ;;
++esac
++
++DEV="-device femu,devsz_mb=32768,namespaces=1,femu_mode=3,queues=64"
++DEV+=",zns_zonesize=134217728,zns_channels=8,zns_channels_per_zone=$CPZ"
++DEV+=",zns_ways=4,zns_ways_per_zone=$WPZ,zns_dies_per_chip=1,zns_planes_per_die=2"
++DEV+=",zns_page_read_latency=65000,zns_page_write_latency=450000"
++DEV+=",zns_channel_transfer_latency=25000,zns_block_erasure_latency=3000000"
++DEV+=",zns_ch_backfill=${BACKFILL:-0}"
++
++REQ_MB=$(( 32768 + $(echo "${MEM:-8G}" | sed 's/G//') * 1024 + 2048 ))
++AVAIL_MB=$(( $(awk '/MemAvailable/ {print $2}' /proc/meminfo) / 1024 ))
++if (( AVAIL_MB < REQ_MB )); then
++    echo "run-femon: ${AVAIL_MB} MB available < ${REQ_MB} MB needed" >&2
++    exit 1
++fi
++
++PIN=(); [[ -n ${FEMU_CPUS:-} ]] && PIN=(taskset -c "$FEMU_CPUS")
++exec ${PIN[@]+"${PIN[@]}"} "$QEMU" -name "CONFZNSPP-FEMON-VM" \
++  -enable-kvm -cpu host -smp "${SMP:-4}" -m "${MEM:-8G}" \
++  -device virtio-scsi-pci,id=scsi0 -device scsi-hd,drive=hd0 \
++  -drive "file=$OSIMGF,if=none,aio=native,cache=none,format=qcow2,id=hd0" \
++  $DEV \
++  -net user,hostfwd=tcp::"${SSH_PORT:-8082}"-:22 -net nic,model=virtio -nographic \
++  -qmp unix:./qmp-sock,server,nowait

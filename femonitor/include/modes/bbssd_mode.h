@@ -10,23 +10,9 @@
 
 #include "../core/data_types.h"
 
-// BBSSD write pointer info structure - Must match FEMU's structure
-typedef struct {
-  int curline_id; /* Current write line ID */
-  int ch;         /* Channel */
-  int lun;        /* LUN */
-  int pg;         /* Page */
-  int blk;        /* Block */
-  int pl;         /* Plane */
-} bbssd_write_pointer_info_t;
-
-// BBSSD line info structure - Must match FEMU's structure
-typedef struct {
-  int id;       /* Line ID (same as block ID) */
-  int ipc;      /* Invalid page count in this line */
-  int vpc;      /* Valid page count in this line */
-  uint64_t pos; /* Position in victim line priority queue */
-} bbssd_line_info_t;
+// Wire-format structs (bbssd_write_pointer_info_t, bbssd_line_info_t,
+// bbssd_monitor_header_t) are defined in the shared protocol header,
+// included via config.h → femon_protocol.h.
 
 // BBSSD line management info structure - Must match FEMU's structure
 typedef struct {

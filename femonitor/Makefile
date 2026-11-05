@@ -1,7 +1,7 @@
 # FEMONITOR Monitoring Tool Makefile
 
 CC = gcc
-CFLAGS = -Wall -Wextra -g -O2
+CFLAGS = -Wall -Wextra -g -O2 -I../femu/hw/femu
 LDFLAGS = -lncurses
 
 TARGET = femonitor
@@ -13,6 +13,7 @@ OBJ_DIR = obj
 SRCS = $(SRC_DIR)/main.c \
        $(SRC_DIR)/core/device_manager.c \
        $(SRC_DIR)/core/nvme_cmd.c \
+       $(SRC_DIR)/core/femon_generic.c \
        $(SRC_DIR)/common/ui_common.c \
        $(SRC_DIR)/common/history.c \
        $(SRC_DIR)/common/log_utils.c \

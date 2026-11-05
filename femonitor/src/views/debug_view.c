@@ -27,8 +27,7 @@ static int debug_view_initialized = 0;
 static int debug_view_raw_data = 0;  // Toggle between summary and raw data view
 static char debug_log_buffer[DEBUG_LOG_SIZE]
                             [256];  // Circular buffer for log entries
-static int debug_log_entries = 0;   // Number of log entries (이름 변경:
-                                    // debug_log_count -> debug_log_entries)
+static int debug_log_entries = 0;   // Number of log entries
 static int debug_log_index = 0;     // Current index in circular buffer
 static int debug_log_top = 0;       // Top displayed log entry
 
@@ -93,7 +92,7 @@ void debug_log_clear(void) {
  * @return Number of log entries
  */
 int debug_log_get_count(
-    void) {  // 이름 변경: debug_log_count -> debug_log_get_count
+    void) {
   return debug_log_entries;
 }
 
@@ -261,7 +260,7 @@ static int draw_debug_log(WINDOW *win, int row, int col, int width,
     }
 
     // Wrap text if needed
-    if ((int)strlen(debug_log_buffer[idx]) > width - 4) {  // 타입 캐스팅 추가
+    if ((int)strlen(debug_log_buffer[idx]) > width - 4) {
       char buffer[256];
       strncpy(buffer, debug_log_buffer[idx], width - 7);
       buffer[width - 7] = '\0';

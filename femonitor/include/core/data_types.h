@@ -29,50 +29,9 @@ enum {
   DEVICE_UNKNOWN = -1,
 };
 
-// Unified device information structure
-typedef struct {
-  // Common device information
-  device_type_t type;  // Device type
-  // Device type specific information
-  union {
-    // BBSSD specific information
-    struct {
-      int secsz;        /* sector size in bytes */
-      int secs_per_pg;  /* # of sectors per page */
-      int pgs_per_blk;  /* # of NAND pages per block */
-      int blks_per_pl;  /* # of blocks per plane */
-      int pls_per_lun;  /* # of planes per LUN (Die) */
-      int luns_per_ch;  /* # of LUNs per channel */
-      int nchs;         /* # of channels in the SSD */
-      int secs_per_blk; /* # of sectors per block */
-      int secs_per_pl;  /* # of sectors per plane */
-      int secs_per_lun; /* # of sectors per LUN */
-      int secs_per_ch;  /* # of sectors per channel */
-      int tt_secs;      /* # of sectors in the SSD */
-      int pgs_per_pl;   /* # of pages per plane */
-      int pgs_per_lun;  /* # of pages per LUN (Die) */
-      int pgs_per_ch;   /* # of pages per channel */
-      int tt_pgs;       /* total # of pages in the SSD */
-      int blks_per_lun; /* # of blocks per LUN */
-      int blks_per_ch;  /* # of blocks per channel */
-      int tt_blks;      /* total # of blocks in the SSD */
-      int secs_per_line;
-      int pgs_per_line;
-      int blks_per_line;
-      int tt_lines;
-      int pls_per_ch; /* # of planes per channel */
-      int tt_pls;     /* total # of planes in the SSD */
-      int tt_luns;    /* total # of LUNs in the SSD */
-    } bbssd;
-
-    // ZNSSD specific information
-    struct {
-      uint64_t num_ch;
-      uint64_t num_lun;
-      uint64_t nr_zones;
-    } znssd;
-  };
-} nvme_device_info_t;
+// Unified device information structure — wire format from the shared
+// protocol header (femon_protocol.h via config.h)
+typedef femon_device_info_t nvme_device_info_t;
 
 // Command line options
 typedef struct {
@@ -87,6 +46,12 @@ typedef struct {
   int auto_start_log;   // Flag to start logging automatically
   int log_mode;         // Logging mode (0: individual, 1: aggregate)
   char log_directory[MAX_DEVICE_PATH];  // Log directory path
+  int snapshot_mode;    // Flag for snapshot mode (single capture, CSV output)
+  int reset_stats;      // Flag to reset statistics before starting
+  int list_mode;        // Flag: print registry schema (0xD1) and exit
+  int generic_mode;     // Flag: dump all registry metrics (0xD2) and exit
+  int trace_ctl;        // Tracepoint control: -1 none, 0 off, 1 on (0xD3)
+  int hist_mode;        // Flag: render histogram metrics and exit
 } femonitor_options_t;
 
 // Base data structure for global view state

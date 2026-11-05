@@ -18,9 +18,9 @@
 // NVMe Admin command opcodes
 #define NVME_ADMIN_CMD_IDENTIFY 0x06    // Identify command
 
-#define NVME_ADM_CMD_DEVTYPE    0xD0    // Custom opcode for device type query
-#define NVME_ADM_CMD_MON_BBSSD  0xC1    // Custom opcode for BBSSD
-#define NVME_ADM_CMD_MON_ZNSSD  0xC2    // Custom opcode for ZNSSD
+// Vendor opcodes + wire-format structs come from the shared protocol header
+// (single source of truth, also compiled into final/femu)
+#include "femon_protocol.h"
 
 
 // Timeout values

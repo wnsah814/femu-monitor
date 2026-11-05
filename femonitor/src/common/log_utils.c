@@ -76,10 +76,10 @@ char *log_utils_format_timestamp(struct timespec current_time, char *buffer,
 
   if (include_ms) {
     snprintf(
-        buffer, buffer_size, "%04d-%02d-%02d %02d:%02d:%02d.%03ld",
+        buffer, buffer_size, "%04d-%02d-%02d %02d:%02d:%02d.%09ld",
         tm_info->tm_year + 1900, tm_info->tm_mon + 1, tm_info->tm_mday,
         tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec,
-        current_time.tv_nsec / 1000000);  // Convert nanoseconds to milliseconds
+        current_time.tv_nsec);  // Full nanosecond precision
   } else {
     strftime(buffer, buffer_size, "%Y-%m-%d %H:%M:%S", tm_info);
   }

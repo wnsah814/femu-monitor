@@ -462,12 +462,12 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
                                       "Full", "ReadOnly", "Offline", "Dirty"};
   const char *szone_sort_names[] = {"ID", "State", "SLBA", "WP", "Dirty"};
 
-  // 각 영역별 너비 계산
-  int panel_width = (width - 3) / 2;  // 중앙 구분선 고려
+  // width of each area
+  int panel_width = (width - 3) / 2;  // leave room for the center divider
   int left_width = panel_width;
   int right_width = width - left_width - 3;
 
-  // RZone 필터링 및 정렬
+  // filter and sort RZone
   hyssd_line_info_t **rzone_lines =
       malloc(info->tt_lines * sizeof(hyssd_line_info_t *));
   int rzone_count = 0;
@@ -478,11 +478,11 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
     }
   }
 
-  // RZone 정렬
+  // sort RZone
   qsort(rzone_lines, rzone_count, sizeof(hyssd_line_info_t *),
         get_rzone_compare_function(line_view_rzone_sort));
 
-  // SZone 필터링 및 정렬
+  // filter and sort SZone
   hyssd_zone_info_t **szone_infos =
       malloc(data->num_zones * sizeof(hyssd_zone_info_t *));
   int szone_count = 0;
@@ -493,11 +493,11 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
     }
   }
 
-  // SZone 정렬
+  // sort SZone
   qsort(szone_infos, szone_count, sizeof(hyssd_zone_info_t *),
         get_szone_compare_function(line_view_szone_sort));
 
-  // 선택된 라인 범위 조정 (RZone)
+  // clamp the selected line range (RZone)
   if (line_view_selected_line >= rzone_count) {
     line_view_selected_line = rzone_count > 0 ? rzone_count - 1 : 0;
   }
@@ -508,7 +508,7 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
     line_view_top_line = line_view_selected_line - visible_rows + 1;
   }
 
-  // 선택된 라인 범위 조정 (SZone)
+  // clamp the selected line range (SZone)
   if (line_view_szone_selected_line >= szone_count) {
     line_view_szone_selected_line = szone_count > 0 ? szone_count - 1 : 0;
   }
@@ -524,7 +524,7 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
   draw_box_with_title(win, row, col, height, width, "HYSSD Lines",
                       COLOR_PAIR_NORMAL);
 
-  // 왼쪽 패널 - RZone 정보
+  // left panel: RZone
   // Draw headers for RZone
   // wattron(win, COLOR_PAIR_BLUE);
   mvwprintw(win, row + 1, col + 2, "Random Zones (Filter: %s, Sort: %s)",
@@ -579,8 +579,8 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
     }
   }
 
-  // 오른쪽 패널 - SZone 정보
-  int right_col = col + left_width + 3;  // 중앙 구분선 다음 위치
+  // right panel: SZone
+  int right_col = col + left_width + 3;  // just past the center divider
 
   // Draw vertical separator
   for (i = row + 1; i < row + height - 1; i++) {
@@ -608,7 +608,7 @@ static int draw_line_list(WINDOW *win, int row, int col, int width, int height,
 
   draw_separator(win, row + 3, right_col, right_width - 2);
 
-  // SZone 정보를 오른쪽에 표시
+  // show SZone on the right
   int szone_visible = (szone_count < visible_rows) ? szone_count : visible_rows;
   for (i = 0; i < szone_visible && i + line_view_szone_top_line < szone_count;
        i++) {

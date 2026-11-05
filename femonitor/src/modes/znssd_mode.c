@@ -34,6 +34,8 @@ int znssd_mode_init(device_context_t *device) {
   // Initialize data
   memset(data, 0, sizeof(znssd_data_t));
   data->znssd_data = NULL;
+  data->channel_stats = NULL;
+  data->plane_stats = NULL;
 
   // Store data in device context
   device->device_data = data;
@@ -52,10 +54,22 @@ void znssd_mode_cleanup(device_context_t *device) {
   znssd_data_t *data = (znssd_data_t *)device->device_data;
 
   if (data) {
-    // Free line management info
+    // Free zone info
     if (data->znssd_data) {
       free(data->znssd_data);
       data->znssd_data = NULL;
+    }
+
+    // Free channel stats (confznsplusplus extended)
+    if (data->channel_stats) {
+      free(data->channel_stats);
+      data->channel_stats = NULL;
+    }
+
+    // Free plane stats (confznsplusplus extended)
+    if (data->plane_stats) {
+      free(data->plane_stats);
+      data->plane_stats = NULL;
     }
 
     // Free device data
@@ -168,7 +182,6 @@ int znssd_mode_render(WINDOW *win, device_context_t *device, int row, int col,
             "Total Zones: %lu  Zone Size: %llu sectors", data->num_zones,
             data->znssd_data[0].d.zcap);
 
-  // JM: MAX OPEN ZONE 정보도 고려해볼 것.
 
   // Zone counts
   mvwprintw(win, next_row + 3, col + 2, "Empty Zones: ");

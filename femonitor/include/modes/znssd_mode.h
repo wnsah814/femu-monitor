@@ -10,27 +10,24 @@
 
 #include "../core/data_types.h"
 
-// ZNSSD zone descriptor information structure
-typedef struct {
-  uint8_t zt;     /* Zone Type */
-  uint8_t zs;     /* Zone State */
-  uint8_t za;     /* Zone Attributes */
-  uint64_t zcap;  /* Zone Capacity */
-  uint64_t zslba; /* Zone Start LBA */
-  uint64_t wp;    /* Write Pointer */
-} znssd_zone_descr_info_t;
+// Wire-format structs (znssd_zone_descr_info_t, znssd_zone_info_t —
+// including the per-zone cnt_reset field, znssd_channel_stat_t,
+// znssd_plane_stat_t, znssd_monitor_header_t) are defined in the shared
+// protocol header, included via config.h → femon_protocol.h.
 
-// Updated ZNSSD zone information structure
-typedef struct {
-  znssd_zone_descr_info_t d;
-  uint64_t w_ptr; /* Write pointer */
-} znssd_zone_info_t;
 // znssd-device monitor data structure
-
 typedef struct {
   uint64_t num_zones;
   uint64_t zr_count;
-  znssd_zone_info_t *znssd_data; /* ZNSSD device data */
+  uint64_t num_channels;        /* Number of channels (confznsplusplus extended) */
+  uint64_t num_planes;          /* Number of planes (confznsplusplus extended) */
+  uint64_t wc_hit;              /* write cache stats (v3) */
+  uint64_t wc_miss;
+  uint64_t wc_evict;
+  uint64_t wc_flush;
+  znssd_zone_info_t *znssd_data;        /* ZNSSD zone data */
+  znssd_channel_stat_t *channel_stats;  /* Channel statistics (confznsplusplus) */
+  znssd_plane_stat_t *plane_stats;      /* Plane statistics (confznsplusplus) */
 } znssd_data_t;
 
 /**

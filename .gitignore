@@ -1,1 +1,5 @@
+build/
+femonitor/obj/
+femonitor/femonitor
+qmp-sock
 .vscode/
